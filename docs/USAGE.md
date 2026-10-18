@@ -1015,7 +1015,7 @@ Invoke-RestMethod -Method Post -Uri "$base/report" `
 plugin_manager remove_bundle target=dsh-bug-reporter
 ```
 
-- **不会删除** `$DSH_HOME/bug-reports.jsonl`，报告留着（`README.md:271`；`index.js` 全文件没有任何
+- **不会删除** `$DSH_HOME/bug-reports.jsonl`，报告留着（`README.md:294`；`index.js` 全文件没有任何
   删除报告文件的代码路径）。
 - **也不会删除**设置文件 `bug-reporter-settings.json`（同样没有删它的路径，只有「恢复默认」会删）。
 - 卸载后「Bug 报告」页消失，`/bug-reporter/*` 路由不再注册（`scoped.effect`，`index.js:2047-2050` 被 dispose），
