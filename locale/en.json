@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "title": "Bug Reporter",
+    "description": "Capture bugs at runtime, repair them with a live reload, then file them as a GitHub pull request."
+  },
+  "ui": {
+    "updates": {
+      "section": "Available updates",
+      "empty": "No updates available",
+      "never": "never checked",
+      "lastCheck": "Last checked: {at}",
+      "checkNow": "Check for updates",
+      "columns": {
+        "installed": "installed",
+        "latest": "latest",
+        "kind": "type"
+      },
+      "kind": {
+        "patch": "patch",
+        "minor": "minor",
+        "major": "major"
+      },
+      "apply": "Update",
+      "ignore": "Ignore",
+      "unignore": "Unignore",
+      "ignoredTitle": "Ignored updates",
+      "logTitle": "Update log",
+      "result": {
+        "applied": "applied",
+        "restart-required": "restart required",
+        "failed": "failed",
+        "skipped": "skipped"
+      }
+    }
+  }
+}

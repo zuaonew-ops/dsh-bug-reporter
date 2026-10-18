@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "title": "Bug 报告",
+    "description": "运行时实时捕获 bug，一键修复并热重载生效，然后提交成 GitHub PR。"
+  },
+  "ui": {
+    "updates": {
+      "section": "可用更新",
+      "empty": "没有可用更新",
+      "never": "还没检查过",
+      "lastCheck": "上次检查：{at}",
+      "checkNow": "立即检查更新",
+      "columns": {
+        "installed": "已装",
+        "latest": "最新",
+        "kind": "类型"
+      },
+      "kind": {
+        "patch": "修订",
+        "minor": "次版本",
+        "major": "主版本"
+      },
+      "apply": "更新",
+      "ignore": "忽略",
+      "unignore": "取消忽略",
+      "ignoredTitle": "已忽略的更新",
+      "logTitle": "更新记录",
+      "result": {
+        "applied": "已应用",
+        "restart-required": "需重启生效",
+        "failed": "失败",
+        "skipped": "已跳过"
+      }
+    }
+  }
+}

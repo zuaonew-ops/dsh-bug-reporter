@@ -1,0 +1,36 @@
+{
+  "name": "dsh-bug-reporter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "运行时实时捕获 bug，一键修复并热重载生效，提交成 GitHub PR；同时实时巡检并更新插件新版本。",
+  "author": "卒奥 (zuao)",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "docs/*.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}

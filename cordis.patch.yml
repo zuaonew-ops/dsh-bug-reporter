@@ -1,0 +1,50 @@
+# dsh-bug-reporter 的 bundle 补丁。
+#
+# 只插入一行。这一行的 config 全部可选，未写的用 index.js 里的默认值。
+#
+# 可调项：
+#   enabled        boolean  默认 true   —— false 则整行不挂载
+#   storePath      string   默认 ''     —— 报告存储文件；留空用 $DSH_HOME/bug-reports.jsonl
+#   settingsPath   string   默认 ''     —— 界面设置的持久化文件；留空用「与报告同目录」的
+#                                          bug-reporter-settings.json（默认即 $DSH_HOME 下）
+#   repo           string   默认 ''     —— 提交 PR 的目标仓库 owner/name；留空则用报告里记的仓库
+#   tokenRef       string   默认 'GITHUB_TOKEN' —— 去哪个凭据名取 GitHub token
+#   baseBranch     string   默认 ''     —— PR 的基分支；留空则用目标仓库的默认分支
+#   maxReports     number   默认 500    —— 最多保留多少条报告
+#   captureTools   boolean  默认 true   —— 是否把工具执行失败也记成报告
+#   captureProcess boolean  默认 true   —— 是否监听 uncaughtException / unhandledRejection
+#   repairEnabled  boolean  默认 true   —— 是否允许 /repair 写文件并触发热重载
+#
+# 版本更新相关：
+#   updateCheckMs  number   默认 3600000 —— 巡检新版本的间隔（毫秒，≥ 60000）
+#   autoUpdate     boolean  默认 false   —— 是否自动装新版本。默认只报告；
+#                                            设成 true 才会在巡检后自动 installBundle
+#   updatePolicy   string   默认 'minor' —— 自动更新允许的最大跨度：
+#                                            'patch' 只装补丁版 / 'minor' 装小版本 / 'any' 全装
+#   ignoredUpdates string[] 默认 []      —— 不再提示的版本，元素形如 "dsh-ops@0.3.1"
+#
+# 挂载后约 3 秒会先主动查一次新版本（不等到第一个 updateCheckMs），
+# 之后按 updateCheckMs 轮询。
+#
+# 设置面板左侧导航的排序位**不是配置项**：它固定在浏览器半区 client.js 里注册
+# settings.section 时写的 `order: 40`。config 里写 order 会走「未知键抛错并点名」。
+#
+# 界面里改的设置（总开关、捕获子开关、repo / tokenRef / baseBranch、忽略的更新）
+# 会原子写进 settingsPath，**重启后优先于这份 yml**。想丢掉这些改动、回到 yml 的值，
+# 用设置页的「恢复默认」按钮（只重置设置，不删报告）。
+#
+# 软依赖（ctx.inject，缺了不报错，只是少一项能力）：
+#   webServer      —— 设置页要用的 HTTP 路由
+#   credentials    —— 取 GitHub token
+#   clientModules  —— 客户端半区的实时热重载入口
+#   pluginManager  —— 查已装版本、查最新版、装新版本
+#   timer          —— 定时巡检
+#
+# 注意：这一行**热装**进正在运行的宿主时，浏览器半区可能进不了 boot graph
+# （宿主对 dsh.client 的扫描是增量的，否定结论缓存到进程重启）。
+# 装完重启一次 DSH 宿主即可。
+
+- insert:
+    - id: bug-reporter
+      name: 'dsh-bug-reporter'
+      config: {}
