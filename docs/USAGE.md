@@ -1,8 +1,8 @@
 # dsh-bug-reporter 使用文档
 
 > 本文是 [README.md](../README.md) 的详细展开版。文中每个事实都取自源码并标注 `文件:行号`，
-> 行号基线：`index.js` **2021 行**、`client.js` **1133 行**、`package.json` 35 行、
-> `cordis.patch.yml` 42 行、`locale/zh.json` 36 行（2026-10-18 当前版本）。
+> 行号基线：`index.js` **2503 行**、`client.js` **1238 行**、`package.json` 36 行、
+> `cordis.patch.yml` 50 行、`locale/zh.json` 36 行（2026-10-18 当前版本，task-22 修完「先摘后装」之后）。
 > 未做真机联调的部分统一收在[第 12 节「未验证项」](#12-未验证项实测缺口)，正文只写能在源码里指到行号的事实。
 
 ---
@@ -42,14 +42,14 @@ message / stack / 归属插件 / 会话 / turn / step 存下来，并把重复�
 | 实时抓 bug | 挂 DSH 的 5 类真实事件 + process 级异常 | `index.js:1756-1868` |
 | 实时维修 | `POST /repair` 原子写源码 → `clientModules.rebuilt()` 触发热重载 | `index.js:1362-1447` |
 | 提交 PR | `POST /submit` 走 GitHub REST 建分支 / 放文件 / 开 PR | `index.js:1450-1540` |
-| 实时更新新版本 | 挂载 3 秒后首次巡检，之后按 `updateCheckMs` 轮询 | `index.js:128, 1949-1972` |
+| 实时更新新版本 | 挂载 3 秒后首次巡检，之后按 `updateCheckMs` 轮询；更新是「先 `removeBundle` 摘旧依赖、再 `installBundle`」两步 | `index.js:143, 1255-1333, 1436-1506, 2423-2447` |
 
 插件由两个半区组成：
 
 | 半区 | 文件 | 职责 | 行数 |
 |---|---|---|---|
-| 宿主半区 | `index.js` | 捕获、存储、路径围栏、GitHub 调用、版本巡检、HTTP 路由 | 2021 |
-| 浏览器半区 | `client.js` | 在「设置 → 侧边栏」注册一页（slot `settings.section`，id `bug-reporter`，排序位 `order: 40` 写死在这里、不是配置项），只做读写与渲染 | 1133 |
+| 宿主半区 | `index.js` | 捕获、存储、路径围栏、GitHub 调用、版本巡检、HTTP 路由 | 2503 |
+| 浏览器半区 | `client.js` | 在「设置 → 侧边栏」注册一页（slot `settings.section`，id `bug-reporter`，排序位 `order: 40` 写死在这里、不是配置项），只做读写与渲染 | 1238 |
 
 两者之间唯一通道是 HTTP 前缀 `/bug-reporter`（`index.js:26`、`client.js:29-40`）。
 包元数据：`dsh-bundle` 补丁 + `dsh.client`（`platform: 'web'`、`immediately: true`、`inject: []`），
@@ -164,10 +164,10 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 「恢复默认」调 `POST /bug-reporter/settings/reset`（`client.js:41`；前端入口 `actResetSettings` 在 `client.js:653-659`）：
 宿主删掉设置文件、
 把内存设置还原成 yml 的值，然后回整份 `/state`（界面随之刷新）。**报告一条都不动** ——
-报告在另一个文件里，由 store 自己管（`resetSettings` 只碰设置，`index.js:2026-2043`）。
+报告在另一个文件里，由 store 自己管（`resetSettings` 只碰设置，`index.js:2355-2372`）。
 
 `tokenConfigured` 是宿主每次响应时现算的：`credentials.resolve(tokenRef)` 拿到非空 `value` 才算已配置
-（`index.js:1395-1400, 1438`）——**token 不缓存**，改了凭据不用重启（`index.js:14`）。
+（`index.js:1595-1600, 1638`）——**token 不缓存**，改了凭据不用重启（`index.js:14`）。
 
 ### 3.4 报告列表
 
@@ -227,9 +227,9 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 | 标题行 | 「可用更新」+ 上次检查时间（`上次检查：<时间>` 或 `还没检查过`）+「立即检查更新」按钮 | `client.js:1002-1012` |
 | 空态 | `没有可用更新` | `client.js:1014-1019` |
 | 每条可用更新 | 模块名 / `已装 <版本>` / `→ 最新 <版本>` / 类型徽章（修订=灰、次版本=黄、主版本=红）/「更新」/「忽略」 | `client.js:1021-1050` |
-| 「更新」按钮 | `POST /update/apply {moduleName}`，**不受 `autoUpdate` 限制**，但必须是当前巡检出来的可用更新 | `client.js:656-658`；`index.js:1673-1675` |
-| 「忽略」按钮 | `POST /update/ignore {moduleName, version}`，把 `模块名@版本` 写进 `ignoredUpdates` | `client.js:661-665` |
-| 已忽略的更新 | 单独一区列出，每行一个「取消忽略」按钮（**再发一次同样参数即取消**） | `client.js:1052-1071`；`index.js:1124-1133` |
+| 「更新」按钮 | `POST /update/apply {moduleName}`，**不受 `autoUpdate` 限制**，但必须是当前巡检出来的可用更新；插件内部走「先 `removeBundle` 再 `installBundle`」 | `client.js:656-658`；`index.js:2107-2128` |
+| 「忽略」按钮 | `POST /update/ignore {moduleName, version}`，把 `模块名@版本` 写进 `ignoredUpdates`（并落盘） | `client.js:661-665` |
+| 已忽略的更新 | 单独一区列出，每行一个「取消忽略」按钮（**再发一次同样参数即取消**） | `client.js:1052-1071`；`index.js:2130-2142` |
 | 更新记录 | 只显示**最近 5 条**（倒序）：结果（已应用=绿 / 需重启生效=黄 / 失败=红 / 已跳过=灰）+ 模块名 + 版本跨度 + 时间 + detail | `client.js:1073-1093` |
 
 ### 3.7 状态行与整页态
@@ -253,7 +253,7 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 ### 4.1 捕获：5 个事件来源 + process 级
 
 所有捕获点都走同一个入口 `capture()`：`enabled !== true` 直接返回；记录抛错只 `logger.warn`，**绝不冒泡**
-（`index.js:1738-1747`）。
+（`index.js:1938-1947`）。
 
 | # | 来源 | 事件 / 时机 | 记什么 | 开关 | 行号 |
 |---|---|---|---|---|---|
@@ -267,13 +267,13 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 
 - 合法的 `source` 只有 6 个：`agent/error`、`api-session/error`、`agent-loop/config-start-failed`、
   `tools/result`、`process`、`manual`（`index.js:66-73`）。HTTP 层传非法值 → `400 invalid-report`
-  （`index.js:1573-1576`）；内部记录时非法值静默归一成 `manual`（`index.js:603`）。
+  （`index.js:1773-1776`）；内部记录时非法值静默归一成 `manual`（`index.js:603`）。
 - `context` 超过 4000 字节（`MAX_CONTEXT_BYTES`）时被替换成 `{truncated: true, preview: <前 4000 字>}`，
   循环引用则返回 `null`（`index.js:35, 281-299`）。
 - process 级捕获的写法：记录 → `process.removeListener` 摘掉自己 → `setImmediate` 里把**原始值**抛回
-  （`index.js:1836-1861`）。这个「不吞掉」是有前提的，见[第 12 节](#12-未验证项实测缺口)。
+  （`index.js:2036-2061`）。这个「不吞掉」是有前提的，见[第 12 节](#12-未验证项实测缺口)。
 - `syncProcessHooks()` 按当前设置增删监听器：`enabled && captureProcess` 才挂，否则完全摘除；
-  每次 `POST /state` 之后都会重挂一次（`index.js:1863-1875, 1560`）。
+  每次 `POST /state` 之后都会重挂一次（`index.js:2063-2075, 1760`）。
 
 ### 4.2 存储与指纹去重
 
@@ -298,26 +298,26 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 
 ### 4.3 修复与热重载
 
-`POST /repair` 收 `{id, path, content}`（`index.js:1634-1640`），执行顺序：
+`POST /repair` 收 `{id, path, content}`（`index.js:1834-1840`），执行顺序：
 
-1. `repairEnabled !== true` → `403 repair-disabled`（`index.js:1356-1358`）；
-2. 校验 `id` / `path` / `content`，缺一个 → `400 invalid-request`（`index.js:1362-1364`）；
-3. 报告不存在 → `404 not-found`（`index.js:1365-1366`）；
-4. 路径围栏（4 道，详见[第 8.5 节](#85-repair-的路径围栏规则)）（`index.js:1370-1418`）；
-5. `atomicWrite(real, content)` —— **按 realpath 之后的真实路径写**（`index.js:1420`）；
+1. `repairEnabled !== true` → `403 repair-disabled`（`index.js:1556-1558`）；
+2. 校验 `id` / `path` / `content`，缺一个 → `400 invalid-request`（`index.js:1562-1564`）；
+3. 报告不存在 → `404 not-found`（`index.js:1565-1566`）；
+4. 路径围栏（4 道，详见[第 8.5 节](#85-repair-的路径围栏规则)）（`index.js:1570-1618`）；
+5. `atomicWrite(real, content)` —— **按 realpath 之后的真实路径写**（`index.js:1620`）；
 6. 热重载：`findOwningPackage(real)` 找到归属包，若该包 `package.json` 有 `dsh.client` 且
    `clientModules.rebuilt` 可用，就调 `rebuilt(pkg.name)`；返回字符串才算重载成功，
-   `reloaded = true`、`rev = <返回值>`（`index.js:1400, 1424-1435`）；
+   `reloaded = true`、`rev = <返回值>`（`index.js:1600, 1624-1635`）；
 7. 记 `fix = { path: absolute, appliedAt, reloaded, rev }` —— 注意 `path` 记的是**请求里的词法绝对路径**
-   （`resolve(target)` 的结果），不是 `real`（`index.js:1368, 1437`）；
-8. 报告置 `fixed` 并保存（`index.js:1438`，`markFixed` 见 `630-637`）。
+   （`resolve(target)` 的结果），不是 `real`（`index.js:1568, 1637`）；
+8. 报告置 `fixed` 并保存（`index.js:1638`，`markFixed` 见 `630-637`）。
 
 `findOwningPackage` 从文件所在目录向上找最近的、含非空 `name` 的 `package.json`
 （`index.js:671-694`），并据此判断 `hasClient`（`dsh.client` 是否存在，`index.js:683-685`）。
 
 ### 4.4 提交 PR
 
-`POST /submit` 收 `{id, repo?, baseBranch?}`（`index.js:1642-1648`）。校验顺序（`index.js:1443-1463`）：
+`POST /submit` 收 `{id, repo?, baseBranch?}`（`index.js:1842-1848`）。校验顺序（`index.js:1643-1663`）：
 
 | 顺序 | 条件 | 失败响应 |
 |---|---|---|
@@ -327,14 +327,14 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 | 4 | 目标仓库为空 | `400 no-repo` |
 
 - token 来源：`credentials.resolve(tokenRef).value` →（拿不到时）`gh auth token`
-  （`index.js:1286-1315`；`gh` 调用超时 10 秒、失败返回 `undefined` 绝不抛，`index.js:158-174`）。
-- 目标仓库优先级：请求体 `repo` → 设置里的 `repo` → 报告 `context.repo`（`index.js:1454-1462`）。
+  （`index.js:1486-1515`；`gh` 调用超时 10 秒、失败返回 `undefined` 绝不抛，`index.js:158-174`）。
+- 目标仓库优先级：请求体 `repo` → 设置里的 `repo` → 报告 `context.repo`（`index.js:1654-1662`）。
 - 基分支优先级：请求体 `baseBranch` → 设置里的 `baseBranch` → 仓库默认分支 → 兜底 `main`
-  （`index.js:1463, 1476-1481`）。
-- 分支名 `branch = bug-report/<指纹前 12 位>`（`index.js:1465`）；PR 标题 `[bug-reporter] <message 首行前 72 字>`
-  （`index.js:1466` 的 `firstLine(...)`，首行为空时是 `(空)`，`index.js:301-305`）。
+  （`index.js:1663, 1676-1681`）。
+- 分支名 `branch = bug-report/<指纹前 12 位>`（`index.js:1665`）；PR 标题 `[bug-reporter] <message 首行前 72 字>`
+  （`index.js:1666` 的 `firstLine(...)`，首行为空时是 `(空)`，`index.js:301-305`）。
 
-GitHub REST 调用序列（`index.js:1474-1512`）：
+GitHub REST 调用序列（`index.js:1674-1712`）：
 
 | # | 调用 | 用途 | 备注 |
 |---|---|---|---|
@@ -349,8 +349,8 @@ GitHub REST 调用序列（`index.js:1474-1512`）：
 
 错误映射（`githubFailure`，`index.js:783-791`）：HTTP 401/403 → `401 github-unauthorized`；
 404 → `404 repo-not-found`；其余 → `502 github-error`。网络层异常 → `502 github-error`
-（`index.js:1513-1516`）。成功后把 `{url, number, repo, branch, at}` 记进报告的 `pr` 字段
-（`index.js:1518-1531`）。
+（`index.js:1713-1716`）。成功后把 `{url, number, repo, branch, at}` 记进报告的 `pr` 字段
+（`index.js:1718-1731`）。
 
 PR 正文 = 报告全文（id / fingerprint / source / level / 次数 / 首次 / 最近 / sessionId / pluginId +
 message + stack + context）；若这条报告**已经修过**，还会追加「修复」一节，写明 `path` / `appliedAt` /
@@ -358,26 +358,53 @@ message + stack + context）；若这条报告**已经修过**，还会追加「
 
 ### 4.5 版本更新
 
-- 首次巡检：挂载后 **3 秒**（`FIRST_UPDATE_CHECK_MS`，`index.js:127, 1949-1956`），
-  不等到第一个 `updateCheckMs`（默认 1 小时），否则界面上会长时间显示「还没检查过」（`index.js:122-126`）。
-- 之后按 `updateCheckMs` 轮询（`index.js:1958-1964`）；间隔取 `settings.updateCheckMs`，
-  非法或 `< 60000` 时回落到默认 1 小时（`index.js:1944-1947`）。
-- 巡检流程 `check()`（`index.js:973-1025`）：`pluginManager.listBundles()` → 逐个 `inspect(模块名)`
-  → `inspected.status !== 'accepted'` 的跳过（`1006`）→ `compareVersions(latest, installed) <= 0` 的不算更新
-  （`1013`）→ 算出 `kind`（`updateKind`，`912-918`）。
+- 首次巡检：挂载后 **3 秒**（`FIRST_UPDATE_CHECK_MS`，`index.js:143, 2423-2447`），
+  不等到第一个 `updateCheckMs`（默认 1 小时），否则界面上会长时间显示「还没检查过」。
+- 之后按 `updateCheckMs` 轮询；间隔取 `settings.updateCheckMs`，
+  非法或 `< 60000` 时回落到默认 1 小时（`MIN_UPDATE_CHECK_MS`，`index.js:142`）。
+- 巡检流程 `check()`（`index.js:1255-1333`）：
+  1. `pluginManager.listBundles()` 拿已装清单；
+  2. **只查来源是 registry 的包**：`installed === false` 的跳过、`source` 命中
+     `NON_REGISTRY_SOURCE`（`link:` / `file:` / `github:` / `git:` / `workspace:` / `portal:`，
+     `index.js:1057`）的跳过（`1296`）；
+  3. 自己查 `GET <registry>/<包名>` 的 `dist-tags.latest`（`fetchLatestVersion`，带 `AbortSignal`
+     超时）；registry 上 404 的静默跳过（`1304`），其他失败记一条 `check-failed`；
+  4. `compareVersions(latest, installed) <= 0` 的不算更新，再算出 `kind`（`updateKind`，`1020-1034`）；
+  5. 每轮把「查了什么」记一条 `checked` 汇总（`recordScan`，`index.js:1228-1252`）——
+     这样能区分「真的都是最新」和「根本查不动」。
+
+  > 已装包的 `pluginManager.inspect()` 一律返回 `already-installed`，**巡检不再用它拿最新版**
+  > （task-21 起改为直查 registry）。
 - 版本比较是自写的语义化比较：认 `v` 前缀、忽略 `+build`、预发布版正确判低于正式版
-  （`parseVersion` `852-865`、`comparePrerelease` `867-892`、`compareVersions` `894-909`）。
-- 安装 `applyOne()`（`index.js:1031-1069`）：`pluginManager.installBundle(模块名)`；
-  `application` 映射为 `applied` → `applied`、`restart-required` → `restart-required`、
-  **其余（含 `overridden` / `failed` / `cancelled`）→ `failed`**（`1048-1054`）；
-  装过之后从「可用更新」里移除（`1067`）。
-- 自动更新 `autoApply()`（`index.js:1072-1103`）：只有 `settings.autoUpdate === true` 才跑；
-  被忽略的、以及 `updatePolicy` 不允许的，只记一条 `skipped` 日志（每种原因只记一次，`skipLogged`）。
-- 更新日志最多 100 条（`MAX_UPDATE_LOG`，`index.js:130, 951-954`），界面只显示最近 5 条。
-- 忽略名单：`toggleIgnore(模块名, 版本)` 把 `模块名@版本` 加进/移出 `settings.ignoredUpdates`
-  （`index.js:1117-1126`）。**这份名单只存在内存里**，重启即失效（`index.js:1730`）。
-- 缺 `pluginManager`：`updates` 保持空数组并记一条 warn，其余能力照常（`index.js:976-981`）。
-- 缺 `timer`：完全不巡检（`index.js:1943`）。
+  （`parseVersion` `960-974`、`comparePrerelease` `976-1008`、`compareVersions` `1010-1018`）。
+- 安装 `applyOne()`（`index.js:1436-1506`）**分两步：先 `removeBundle` 摘掉旧依赖，再
+  `installBundle` 装新版** —— 不能只调 `installBundle`：宿主有 HMR 时它对「已经是 profile
+  依赖」的包一律抛 `already-installed`（`@deepseek-ai/dsh-plugin-manager` 里 `installBundle`
+  的守卫），装了等于没装，这就是「点了更新但什么都没变」的根因；`removeBundle` 自己的
+  `nextStep` 也是这么要求的。每一步都如实记账：
+  - `installBundle` 不存在（`pluginManager` 不可用）→ 直接抛错，端点转 `502 operation-failed`
+    （`1438-1440`）；
+  - `removeBundle` 不存在（老宿主）→ 记 `failed`，**不** install（`1447-1456`）；
+  - `removeBundle` 抛错 → 记 `failed` 后继续外抛（`1461-1464`）；
+  - `removeBundle` 带回 `error` → 停手，**不** install（`1467-1481`）：
+    `not-removable` / `bundle-in-use` / `management-required` / `unaddressable` 记 `failed`
+    并写明「这个包不能自动更新，请手动 `dsh plugin` 更新」（`removeHint`，`1357-1380`）；
+    `stop-profile` 记 `restart-required` 并提示重启 profile（`1469-1478`）；
+  - 摘掉了但 `installBundle` 没成 → **自动补救重装一次**（`retryInstall`，`1390-1405`）：
+    补救成功就如实记 `applied` / `restart-required`，补救也失败才记 `failed`，detail 里写
+    「**已移除但重装失败，需要手动重装**」+ 具体错误（`recordDangerousFailure`，`1407-1434`；
+    调用点 `1486-1492` 抛错路径、`1495-1499` 软失败路径）；
+  - 只有 `application === 'applied'` 才记 `applied`；`restart-required` 如实记（`1501-1505`）；
+  - 更新真的落盘后才从「可用更新」里移除（`drop`，`1382-1384`）；**失败的那条留着**，
+    可以直接再点一次。
+- 自动更新 `autoApply()`（`index.js:1509-1541`）：只有 `settings.autoUpdate === true` 才跑，
+  走的**就是同一条 `applyOne()`**；被忽略的、以及 `updatePolicy` 不允许的，只记一条 `skipped`
+  日志（每种原因只记一次，`skipLogged`）。
+- 更新日志最多 100 条（`MAX_UPDATE_LOG`，`index.js:146, 1176-1179`），界面只显示最近 5 条。
+- 忽略名单：`toggleIgnore(模块名, 版本)`（`index.js:1554-1565`）把 `模块名@版本` 加进/移出
+  `settings.ignoredUpdates`，并**落盘**到设置文件。
+- 缺 `pluginManager`：`updates` 保持空数组并记一条 warn，其余能力照常（`index.js:2412-2421`）。
+- 缺 `timer`：完全不巡检（`index.js:2423-2447`）。
 
 ---
 
@@ -449,7 +476,7 @@ message + stack + context）；若这条报告**已经修过**，还会追加「
 }
 ```
 
-一条由 `agent/error` 事件产生的报告长这样（字段与 `store.record()` 的写入一致，`index.js:1863-1870`；
+一条由 `agent/error` 事件产生的报告长这样（字段与 `store.record()` 的写入一致，`index.js:2192-2199`；
 `stack` 里前 3 个 `at ` 帧参与指纹）：
 
 ```json
@@ -532,21 +559,21 @@ message + stack + context）；若这条报告**已经修过**，还会追加「
 
 | # | 键 | 类型 | 默认 | 边界 / 校验 | 作用 | 行号 |
 |---|---|---|---|---|---|---|
-| 1 | `enabled` | boolean | `true` | `BOOLEAN_KEYS`：必须 boolean | `false` 则 `apply()` 直接 return，**整行不挂载** | `94, 214-215, 1845` |
+| 1 | `enabled` | boolean | `true` | `BOOLEAN_KEYS`：必须 boolean | `false` 则 `apply()` 直接 return，**整行不挂载** | `94, 214-215, 2174` |
 | 2 | `storePath` | string | `''` | 必须 string | 报告文件绝对路径；空则 `$DSH_HOME/bug-reports.jsonl`（`resolveStorePath`） | `95, 241-249` |
 | 3 | `settingsPath` | string | `''` | 必须 string | 界面设置的持久化文件；空则**与报告同目录**（默认 `$DSH_HOME/bug-reporter-settings.json`） | `96, 250-259` |
-| 4 | `repo` | string | `''` | 必须 string | 提交 PR 的目标仓库 `owner/name` | `97, 1569` |
-| 5 | `tokenRef` | string | `'GITHUB_TOKEN'` | 必须 string | 去哪个凭据名取 GitHub token | `98, 1400` |
-| 6 | `baseBranch` | string | `''` | 必须 string | PR 基分支；空则用目标仓库默认分支 | `99, 1573` |
+| 4 | `repo` | string | `''` | 必须 string | 提交 PR 的目标仓库 `owner/name` | `97, 1898` |
+| 5 | `tokenRef` | string | `'GITHUB_TOKEN'` | 必须 string | 去哪个凭据名取 GitHub token | `98, 1729` |
+| 6 | `baseBranch` | string | `''` | 必须 string | PR 基分支；空则用目标仓库默认分支 | `99, 1902` |
 | 7 | `maxReports` | number | `500` | 有限数字且 **≥ 1** | 最多保留多少条报告 | `100, 217-220, 664-666` |
-| 8 | `captureTools` | boolean | `true` | 必须 boolean | 是否把工具执行失败记成报告 | `101, 1921` |
-| 9 | `captureProcess` | boolean | `true` | 必须 boolean | 是否监听 `uncaughtException` / `unhandledRejection` | `102, 1988-1996` |
-| 10 | `repairEnabled` | boolean | `true` | 必须 boolean | 是否允许 `/repair` 写文件并热重载 | `103, 1466-1467` |
-| 11 | `updateCheckMs` | number | `3600000` | 有限数字且 **≥ 60000** | 版本巡检间隔（毫秒） | `104, 221-223, 2096-2097` |
-| 12 | `autoUpdate` | boolean | `false` | 必须 boolean | `settings.autoUpdate` 为 `true` 时，巡检（`updateCheckMs`）之后自动 `installBundle`；默认只报告 | `1181` |
-| 13 | `updatePolicy` | string | `'minor'` | 只能是 `patch` \| `minor` \| `any`（`UPDATE_POLICIES`） | 自动更新允许的最大跨度 | `106, 133, 228-231, 1191-1200` |
-| 14 | `ignoredUpdates` | string[] | `[]` | 必须 `string[]` | 不再提示的版本，元素形如 `dsh-ops@0.3.1` | `107, 224-227, 1071-1101` |
-| 15 | `repairRoots` | string[] | `[]` | 必须 `string[]` | `/repair` 允许写的额外根目录（realpath 后判定） | `108, 1503` |
+| 8 | `captureTools` | boolean | `true` | 必须 boolean | 是否把工具执行失败记成报告 | `101, 2250` |
+| 9 | `captureProcess` | boolean | `true` | 必须 boolean | 是否监听 `uncaughtException` / `unhandledRejection` | `102, 2317-2325` |
+| 10 | `repairEnabled` | boolean | `true` | 必须 boolean | 是否允许 `/repair` 写文件并热重载 | `103, 1666-1667` |
+| 11 | `updateCheckMs` | number | `3600000` | 有限数字且 **≥ 60000** | 版本巡检间隔（毫秒） | `104, 221-223, 2425-2426` |
+| 12 | `autoUpdate` | boolean | `false` | 必须 boolean | `settings.autoUpdate` 为 `true` 时，巡检（`updateCheckMs`）之后自动走**同一条 `applyOne()`**（先 `removeBundle` 摘旧依赖、再 `installBundle`）；默认只报告 | `1509-1541` |
+| 13 | `updatePolicy` | string | `'minor'` | 只能是 `patch` \| `minor` \| `any`（`UPDATE_POLICIES`） | 自动更新允许的最大跨度 | `106, 133, 228-231, 1520-1529` |
+| 14 | `ignoredUpdates` | string[] | `[]` | 必须 `string[]` | 不再提示的版本，元素形如 `dsh-ops@0.3.1` | `107, 224-227, 1188-1275` |
+| 15 | `repairRoots` | string[] | `[]` | 必须 `string[]` | `/repair` 允许写的额外根目录（realpath 后判定） | `108, 1832` |
 
 > **行号列是快照**：task-19 只把**动过的区域**（`DEFAULTS`、`resolveConfig`、设置持久化、
 > 开关与恢复默认）逐处核对过（开发期脚本 `_doc-lineno-check.mjs`，未随仓库分发）；task-12 / task-15 / task-17
@@ -595,7 +622,7 @@ autoUpdate, updatePolicy, ignoredUpdates, repairRoots）
 **其余键出现在请求体里会被静默忽略、不报错**（`index.js:81-82` 注释 + `1449-1459` 只遍历 `PATCHABLE`）。
 本机实测：`POST /state {"maxReports":3}` → `200`，而 `settings.maxReports` 仍是 `500`。
 
-`ignoredUpdates` 不在 `PATCHABLE` 里，但它由 `/update/ignore` 改，**同样会持久化**（`index.js:1225-1233`）。
+`ignoredUpdates` 不在 `PATCHABLE` 里，但它由 `/update/ignore` 改，**同样会持久化**（`index.js:1554-1562`）。
 
 ### 6.4 profile 覆写示例
 
@@ -632,9 +659,9 @@ autoUpdate, updatePolicy, ignoredUpdates, repairRoots）
 
 ### 7.1 路由注册与统一信封
 
-- 宿主用 `webServer.register({ kind: 'prefix', path: '/bug-reporter', handler })` 注册（`index.js:2048`），
+- 宿主用 `webServer.register({ kind: 'prefix', path: '/bug-reporter', handler })` 注册（`index.js:2377`），
   前缀固定 `/bug-reporter`（`index.js:26`），不可配置。
-- **所有**请求先进跨站防护（`rejectCrossSite`，`index.js:1658`，见第 8 节），再进路由表。
+- **所有**请求先进跨站防护（`rejectCrossSite`，`index.js:1987`，见第 8 节），再进路由表。
 - 成功：`200 {ok: true, value: {...}}`；失败：`{ok: false, error: {code, message}}`（`sendJson`，`index.js:463-474`）。
 - 响应头固定 `content-type: application/json; charset=utf-8`、`cache-control: no-store`、`vary: Origin`
   （`sendJson` 里，`index.js:463-471`）。
@@ -643,51 +670,51 @@ autoUpdate, updatePolicy, ignoredUpdates, repairRoots）
 
 | # | 方法 + 路径 | 请求体 | 成功的 `value` | 行号 |
 |---|---|---|---|---|
-| 1 | `GET /bug-reporter/state` | — | `{enabled, captureTools, captureProcess, repairEnabled, repo, tokenRef, baseBranch, tokenConfigured, storeFile, reports[], updates[], lastUpdateCheckAt, updateLog[]}` | `1661-1665, 1428-1447` |
-| 2 | `POST /bug-reporter/state` | 7 个可改键的子集 | 同上（保存后的状态），并**原子写盘** | `1661-1673` |
-| 3 | `POST /bug-reporter/settings/reset` | `{}` | 同上（回到 `cordis.patch.yml` 的值，**报告不删**） | `1675-1681` |
-| 4 | `POST /bug-reporter/report` | `{message, source?, level?, stack?, pluginId?, sessionId?, context?}` | `{report}` | `1683-1718` |
-| 5 | `POST /bug-reporter/report/update` | `{id, status}` | `{report}` | `1720-1732` |
-| 6 | `POST /bug-reporter/report/delete` | `{id}` | `{deleted: true}` | `1734-1742` |
-| 7 | `POST /bug-reporter/report/clear` | `{}` | `{cleared: <清掉的条数>}` | `1744-1750` |
-| 8 | `POST /bug-reporter/repair` | `{id, path, content}` | `{report, fix}` | `1752-1758` |
-| 9 | `POST /bug-reporter/submit` | `{id, repo?, baseBranch?}` | `{report, pr}` | `1760-1766` |
-| 10 | `POST /bug-reporter/update/check` | `{}` | 整份状态（同 #1） | `1768-1776` |
-| 11 | `POST /bug-reporter/update/apply` | `{moduleName}` | 整份状态 | `1778-1799` |
-| 12 | `POST /bug-reporter/update/ignore` | `{moduleName, version}` | 整份状态（并写盘） | `1801-1813` |
-| — | 其他任何路径 | — | `404 not-found`，message `未知路径 <pathname>` | `1815` |
+| 1 | `GET /bug-reporter/state` | — | `{enabled, captureTools, captureProcess, repairEnabled, repo, tokenRef, baseBranch, tokenConfigured, storeFile, reports[], updates[], lastUpdateCheckAt, updateLog[]}` | `1990-1994, 1757-1776` |
+| 2 | `POST /bug-reporter/state` | 7 个可改键的子集 | 同上（保存后的状态），并**原子写盘** | `1990-2002` |
+| 3 | `POST /bug-reporter/settings/reset` | `{}` | 同上（回到 `cordis.patch.yml` 的值，**报告不删**） | `2004-2010` |
+| 4 | `POST /bug-reporter/report` | `{message, source?, level?, stack?, pluginId?, sessionId?, context?}` | `{report}` | `2012-2047` |
+| 5 | `POST /bug-reporter/report/update` | `{id, status}` | `{report}` | `2049-2061` |
+| 6 | `POST /bug-reporter/report/delete` | `{id}` | `{deleted: true}` | `2063-2071` |
+| 7 | `POST /bug-reporter/report/clear` | `{}` | `{cleared: <清掉的条数>}` | `2073-2079` |
+| 8 | `POST /bug-reporter/repair` | `{id, path, content}` | `{report, fix}` | `2081-2087` |
+| 9 | `POST /bug-reporter/submit` | `{id, repo?, baseBranch?}` | `{report, pr}` | `2089-2095` |
+| 10 | `POST /bug-reporter/update/check` | `{}` | 整份状态（同 #1） | `2097-2105` |
+| 11 | `POST /bug-reporter/update/apply` | `{moduleName}` | 整份状态 | `2107-2128` |
+| 12 | `POST /bug-reporter/update/ignore` | `{moduleName, version}` | 整份状态（并写盘） | `2130-2142` |
+| — | 其他任何路径 | — | `404 not-found`，message `未知路径 <pathname>` | `2144` |
 
 非 `GET`/`POST` 的方法（含 `OPTIONS`）在命中的路由里一律 `405 method-not-allowed`
-（`index.js:1666, 1676, 1684, 1721, 1735, 1745, 1753, 1761, 1769, 1779, 1802`）。
+（`index.js:1995, 2005, 2013, 2050, 2064, 2074, 2082, 2090, 2098, 2108, 2131`）。
 
 ### 7.3 全部错误码
 
 | `code` | HTTP | 触发条件 | 行号 |
 |---|---|---|---|
-| `bad-url` | 400 | `req.url` 无法解析成 URL | `1649-1653` |
-| `cross-site` | 403 | `Sec-Fetch-Site: cross-site` | `1354-1361` |
-| `bad-origin` | 403 | `Origin` 存在且与服务端不同源 | `1363-1374` |
-| `unsupported-media-type` | 415 | `POST` 的 `content-type` 不是 `application/json` | `1376-1389` |
+| `bad-url` | 400 | `req.url` 无法解析成 URL | `1978-1982` |
+| `cross-site` | 403 | `Sec-Fetch-Site: cross-site` | `1683-1690` |
+| `bad-origin` | 403 | `Origin` 存在且与服务端不同源 | `1692-1703` |
+| `unsupported-media-type` | 415 | `POST` 的 `content-type` 不是 `application/json` | `1705-1718` |
 | `body-too-large` | **413** | 请求体超过 1 MiB | `487-500, 523-534` |
 | `bad-body` | 400 | 读请求体本身失败（非超限） | `536-538` |
 | `bad-json` | 400 | body 不是合法 JSON，或不是 JSON 对象 | `542-553` |
 | `method-not-allowed` | 405 | 命中的路由不支持该方法 | `1666` 等（见 7.2） |
-| `invalid-state` | 400 | `POST /state` 的键类型不对 | `1449-1459` |
-| `invalid-report` | 400 | `POST /report` 字段非法（message 空 / source 非法 / stack / level / pluginId / sessionId 类型错） | `1689-1706` |
-| `invalid-status` | 400 | `status` 不是 `open`/`fixed`/`ignored` | `1726` |
-| `invalid-request` | 400 | 缺 `id` / 缺 `path` / 缺 `content` | `1472-1474, 1555, 1724, 1738` |
-| `not-found` | 404 | 报告不存在 / 未知路径 | `1476, 1557, 1729, 1739, 1815` |
-| `repair-disabled` | 403 | `repairEnabled` 为 `false` 时调 `/repair` | `1466-1468` |
-| `path-not-allowed` | 403 | `/repair` 路径围栏拒绝（6 种原因，见 8.5） | `1490-1530` |
-| `no-token` | 401 | `credentials.resolve` 与 `gh auth token` 都拿不到 token | `1559-1562` |
-| `no-repo` | 400 | 请求体 / 设置 / 报告 context 都没有仓库 | `1570-1572` |
+| `invalid-state` | 400 | `POST /state` 的键类型不对 | `1778-1788` |
+| `invalid-report` | 400 | `POST /report` 字段非法（message 空 / source 非法 / stack / level / pluginId / sessionId 类型错） | `2018-2035` |
+| `invalid-status` | 400 | `status` 不是 `open`/`fixed`/`ignored` | `2055` |
+| `invalid-request` | 400 | 缺 `id` / 缺 `path` / 缺 `content` | `1801-1803, 1884, 2053, 2067` |
+| `not-found` | 404 | 报告不存在 / 未知路径 | `1805, 1886, 2058, 2068, 2144` |
+| `repair-disabled` | 403 | `repairEnabled` 为 `false` 时调 `/repair` | `1666-1668` |
+| `path-not-allowed` | 403 | `/repair` 路径围栏拒绝（6 种原因，见 8.5） | `1819-1859` |
+| `no-token` | 401 | `credentials.resolve` 与 `gh auth token` 都拿不到 token | `1888-1891` |
+| `no-repo` | 400 | 请求体 / 设置 / 报告 context 都没有仓库 | `1899-1901` |
 | `github-unauthorized` | 401 | GitHub 返回 401 / 403 | `896` |
 | `repo-not-found` | 404 | GitHub 返回 404 | `897` |
-| `github-error` | 502 | GitHub 其他状态码 / 拿不到 sha / 网络异常 | `898, 1600, 1625` |
-| `missing-param` | 400 | `/update/apply` 缺 `moduleName`；`/update/ignore` 缺 `moduleName` 或 `version` | `1783, 1807-1808` |
-| `unknown-module` | 404 | `/update/apply` 的模块不在当前可用更新里 | `1785-1787` |
-| `operation-failed` | 502 | `installBundle` 抛错 | `1788-1796` |
-| `internal` | 500 | 上面没接住的其他异常 | `1821-1827` |
+| `github-error` | 502 | GitHub 其他状态码 / 拿不到 sha / 网络异常 | `898, 1929, 1954` |
+| `missing-param` | 400 | `/update/apply` 缺 `moduleName`；`/update/ignore` 缺 `moduleName` 或 `version` | `2112, 2136-2137` |
+| `unknown-module` | 404 | `/update/apply` 的模块不在当前可用更新里 | `2114-2116` |
+| `operation-failed` | 502 | `removeBundle` 或 `installBundle` 抛错（摘不掉返回错误码的算软失败，仍 200） | `2117-2125` |
+| `internal` | 500 | 上面没接住的其他异常 | `2150-2156` |
 
 ### 7.4 本机实测输出（真 socket，临时 `storePath`）
 
@@ -774,7 +801,7 @@ Invoke-RestMethod -Method Post -Uri "$base/report" `
 
 ⚠️ 三个坑：
 
-1. **`content-type` 必须是 `application/json`**，否则 `415`（`index.js:1376-1389`）——
+1. **`content-type` 必须是 `application/json`**，否则 `415`（`index.js:1705-1718`）——
    `curl -d` 默认发 `application/x-www-form-urlencoded`，要用 `--data-binary` + `-H`；
 2. 端口是本次运行的 DSH Web 端口（每次启动可能不同），以浏览器地址栏为准；
 3. PowerShell 5.1 的 `Get-Content` 读 UTF-8 中文会按 GBK 解码出错，用
@@ -828,32 +855,32 @@ Invoke-RestMethod -Method Post -Uri "$base/report" `
 对运行中的宿主发一个带恶意 `Origin`（再加 `Sec-Fetch-Site: cross-site`）的请求仍返回 200，
 且响应里没有任何 CORS 头 —— 这一点由 lead 在本机实测确认；**我这一轮只测了插件自己 handler 的行为**
 （见 7.4 的实测表），没有自己复测「绕过插件的裸 webServer」。
-插件源码里同一段结论写在 `index.js:1222-1239` 的注释里：
+插件源码里同一段结论写在 `index.js:1422-1439` 的注释里：
 「任意网页都能用 `content-type: text/plain` 发**跨站简单请求**（不触发预检）打到这里，
 而且请求会在服务端真的执行 —— `/report/clear`（清空报告）、`/state`（改 repo）、
 `/repair`（往包目录写文件 → 下次加载即代码执行）全都在射程内。」
 
 ### 8.2 插件自己加的三道闸
 
-入口是 `rejectCrossSite()`（`index.js:1240-1282`），在**所有路径、所有方法**上最先执行一次
-（`index.js:1547-1548`）：
+入口是 `rejectCrossSite()`（`index.js:1440-1482`），在**所有路径、所有方法**上最先执行一次
+（`index.js:1747-1748`）：
 
 | 闸 | 条件 | 结果 | 行号 |
 |---|---|---|---|
-| 1 | 请求头 `Sec-Fetch-Site` 存在，且 `trim().toLowerCase()` 后等于 `cross-site` | `403` `cross-site` | `1244-1251` |
-| 2 | `Origin` 存在（非空）且其 host 与服务端**不同源** | `403` `bad-origin` | `1253-1264` |
-| 3 | 方法为 `POST` 且 `content-type` 去掉参数后不是 `application/json` | `415` `unsupported-media-type` | `1266-1279` |
+| 1 | 请求头 `Sec-Fetch-Site` 存在，且 `trim().toLowerCase()` 后等于 `cross-site` | `403` `cross-site` | `1444-1451` |
+| 2 | `Origin` 存在（非空）且其 host 与服务端**不同源** | `403` `bad-origin` | `1453-1464` |
+| 3 | 方法为 `POST` 且 `content-type` 去掉参数后不是 `application/json` | `415` `unsupported-media-type` | `1466-1479` |
 
 配套细节：
 
 - **`Origin` 缺失时放行**（闸 2 只在 `Origin` 存在时判定），这是为了 curl / 本机原生客户端能用
-  （`index.js:1232-1233`）。
+  （`index.js:1432-1433`）。
 - 服务端自己的 host：优先 `webServer.getOrigin()`，取不到 / 抛错 / 方法不存在时**退化**成比对
-  本次请求的 `Host` 头（`selfHostOf`，`index.js:1177-1202`）。
-- `sameHost`（`index.js:1204-1220`）：完全相同，或**都是 loopback 别名且端口相同**
+  本次请求的 `Host` 头（`selfHostOf`，`index.js:1377-1402`）。
+- `sameHost`（`index.js:1404-1420`）：完全相同，或**都是 loopback 别名且端口相同**
   （`localhost` ↔ `127.0.0.1` ↔ `[::1]`）。加这条是因为浏览器地址栏写 `localhost:<端口>`
   而 `getOrigin()` 返回 `127.0.0.1:<端口>` 时，严格字符串比对会把**设置页自己**403 掉；
-  跨站域名永远匹配不上，防护不受影响（`index.js:1216-1218`）。**端口不同仍然拒**（拦同站不同端口）。
+  跨站域名永远匹配不上，防护不受影响（`index.js:1416-1418`）。**端口不同仍然拒**（拦同站不同端口）。
 - 响应**不加**任何 `Access-Control-Allow-*`；统一加 `Vary: Origin`（源码里是 `vary: 'Origin'`，`index.js:361-362`）。
 - 设置页自己的 POST 带 `content-type: application/json`（`client.js:301-308`），所以闸 3 不会打死设置页。
 
@@ -890,16 +917,16 @@ Invoke-RestMethod -Method Post -Uri "$base/report" `
 
 ### 8.5 `/repair` 的路径围栏规则
 
-`handleRepair` 按顺序过 4 道（`index.js:1370-1418`）：
+`handleRepair` 按顺序过 4 道（`index.js:1570-1618`）：
 
 | 道 | 规则 | 拒绝时的 message | 行号 |
 |---|---|---|---|
-| 1a | 词法绝对路径含 NUL 字节（`\u0000`） | `拒绝写入：路径含 NUL 字节` | `1380-1382` |
-| 1b | 原路径或绝对路径以 `\\` / `//` 开头（UNC） | `拒绝写入 <原路径>：不接受 UNC 路径` | `1383-1385` |
-| 2 | 对目标做 **realpath**（对已存在的最近祖先 `realpathSync`，再把不存在的尾段拼回去；连盘根都 realpath 不了时退化为入参）；realpath 后含 NUL 再拒一次 | `拒绝写入：真实路径含 NUL 字节` | `1387-1390, 696-719` |
-| 3 | 真实路径必须落在**允许根**内。允许根 = `config.repairRoots`（各自 realpath 后）**∪** 该报告 `pluginId` 所属插件包的目录（`clientModules.clientPath(pluginId)` → 向上找最近 `package.json` → realpath） | `拒绝写入 <真实路径>：它不在报告所属插件（<pluginId 或 无 pluginId>）的包目录内，也不在 config.repairRoots 里` | `1392-1407, 730-753` |
-| 4a | basename（小写）等于 `package.json` | `拒绝写入 package.json：改 manifest 等于换插件` | `1408-1410` |
-| 4b | 扩展名不在白名单 | `拒绝写入 <真实路径>：只允许改源码/资源文件（.js .mjs .cjs .ts .jsx .tsx .css .html .svg .txt）` | `1411-1418, 46-57` |
+| 1a | 词法绝对路径含 NUL 字节（`\u0000`） | `拒绝写入：路径含 NUL 字节` | `1580-1582` |
+| 1b | 原路径或绝对路径以 `\\` / `//` 开头（UNC） | `拒绝写入 <原路径>：不接受 UNC 路径` | `1583-1585` |
+| 2 | 对目标做 **realpath**（对已存在的最近祖先 `realpathSync`，再把不存在的尾段拼回去；连盘根都 realpath 不了时退化为入参）；realpath 后含 NUL 再拒一次 | `拒绝写入：真实路径含 NUL 字节` | `1587-1590, 696-719` |
+| 3 | 真实路径必须落在**允许根**内。允许根 = `config.repairRoots`（各自 realpath 后）**∪** 该报告 `pluginId` 所属插件包的目录（`clientModules.clientPath(pluginId)` → 向上找最近 `package.json` → realpath） | `拒绝写入 <真实路径>：它不在报告所属插件（<pluginId 或 无 pluginId>）的包目录内，也不在 config.repairRoots 里` | `1592-1607, 730-753` |
+| 4a | basename（小写）等于 `package.json` | `拒绝写入 package.json：改 manifest 等于换插件` | `1608-1610` |
+| 4b | 扩展名不在白名单 | `拒绝写入 <真实路径>：只允许改源码/资源文件（.js .mjs .cjs .ts .jsx .tsx .css .html .svg .txt）` | `1611-1618, 46-57` |
 
 判定「是否在目录内」用 `isInsideDir`：先 `resolve` 再比较，**Windows 上大小写不敏感**，
 相等或 `isInsideDir` 里 `target.startsWith(...)` 才算在内（`index.js:721-728`）。
@@ -928,7 +955,7 @@ Invoke-RestMethod -Method Post -Uri "$base/report" `
    `package.json:28-33`）；
 4. 宿主行加载失败也会导致整页消失：配置校验是 fail loud 的（未知键 / 类型错都会抛，见 6.1）；
 5. 打开浏览器开发者工具看 `GET /bug-reporter/state` 是否 200；404 说明宿主行没挂上
-   （或 `webServer` 是软依赖没注入，`index.js:1891-1906`）。
+   （或 `webServer` 是软依赖没注入，`index.js:2091-2106`）。
 
 ### 9.2 装完没生效
 
@@ -953,23 +980,26 @@ Invoke-RestMethod -Method Post -Uri "$base/report" `
 | `invalid-request` | 400 | 请求缺 `id`（`index.js:1452`） |
 | `not-found` | 404 | 报告 id 不存在（可能已被删除）（`index.js:1454`） |
 
-补充：分支名固定 `branch = bug-report/<指纹前 12 位>`（`index.js:1465`），所以**同一个错误重复提交会复用同一条分支**
-（`POST /git/refs` 返回 422 时不报错，`index.js:1494-1495`）；第二次提交会因为「同一分支下同名文件」
+补充：分支名固定 `branch = bug-report/<指纹前 12 位>`（`index.js:1904`），所以**同一个错误重复提交会复用同一条分支**
+（`POST /git/refs` 返回 422 时不报错，`index.js:1932`）；第二次提交会因为「同一分支下同名文件」
 或 PR 已存在而由 GitHub 报错，报错会按上表映射成 `github-error`。
 
 ### 9.4 更新装不上 / `restart-required` 是什么意思
 
 | 现象 | 含义 | 行号 |
 |---|---|---|
-| 更新记录里 `已应用`（`applied`） | `installBundle` 返回的 `application === 'applied'`，本次已生效 | `index.js:1055-1061` |
-| 更新记录里 `需重启生效`（`restart-required`） | `application === 'restart-required'`：**装了但需要重启宿主才生效**，插件如实记录，不谎报 | `index.js:1059-1061`；`client.js:1078-1091` |
-| 更新记录里 `失败`（`failed`） | `application` 是 `overridden` / `failed` / `cancelled` 或缺失，或 `installBundle` 抛错 | `index.js:1055-1061, 1050-1053` |
-| 更新记录里 `已跳过`（`skipped`） | 在 `ignoredUpdates` 里，或 `updatePolicy` 不含该 `kind`（只记一次） | `index.js:1083-1103` |
-| HTTP `502 operation-failed` | 手动点「更新」时 `installBundle` 抛错 | `index.js:1677-1685` |
-| HTTP `404 unknown-module` | 手动点的模块不在当前「可用更新」列表里（先点「立即检查更新」） | `index.js:1674-1676` |
-| HTTP `400 missing-param` | `/update/apply` 缺 `moduleName`，或 `/update/ignore` 缺 `version` | `index.js:1672, 1696-1697` |
-| 「可用更新」一直是空 | `pluginManager` 没注入（`updates` 保持空 + warn，`index.js:983-988`）；或 `timer` 没注入（完全不巡检，`index.js:1950`）；或没有真正的新版本（`compareVersions(latest, installed) <= 0` 不算更新，`index.js:1020`）；或 `inspect` 的 `status` 不是 `accepted`（`index.js:1013`） |
-| 忽略名单重启就没了 | `ignoredUpdates` 只在内存里（`index.js:1737`）；要持久化就写进 profile 的 `config` |
+| 更新记录里 `已应用`（`applied`） | `installBundle` 返回的 `application === 'applied'`，本次已生效 | `index.js:1501-1505` |
+| 更新记录里 `需重启生效`（`restart-required`） | `application === 'restart-required'`（**装了但需要重启宿主才生效**），或 `removeBundle` 返回 `stop-profile`（这次什么都没改，重启后再点一次）；插件如实记录，不谎报 | `index.js:1469-1478, 1501-1505`；`client.js:1078-1091` |
+| 更新记录里 `失败`（`failed`） | `application` 不是 `applied` / `restart-required`（含 `failed` / `cancelled` / 缺失），或 `removeBundle` 摘不掉（`not-removable` / `bundle-in-use` / `management-required` / `unaddressable`），或两步里任何一步抛错 | `index.js:1447-1456, 1467-1481, 1495-1499` |
+| 更新记录里 `失败` 且 detail 带「**已移除但重装失败，需要手动重装**」 | 最危险的一种：旧依赖已经摘掉、新版没装上，**补救重装也没成** —— 手动 `dsh plugin` 重装这个包 | `index.js:1407-1434` |
+| 更新记录里 `已跳过`（`skipped`） | 在 `ignoredUpdates` 里，或 `updatePolicy` 不含该 `kind`（只记一次） | `index.js:1511-1541` |
+| 更新后那一项**还在**列表里 | 说明这次没装成功（失败时故意保留，可以直接再点一次）；只有真的落盘了才 `drop()` 掉 | `index.js:1382-1384` |
+| HTTP `502 operation-failed` | 手动点「更新」时 `removeBundle` 或 `installBundle` 抛错 | `index.js:2117-2125` |
+| HTTP `404 unknown-module` | 手动点的模块不在当前「可用更新」列表里（先点「立即检查更新」） | `index.js:2114-2116` |
+| HTTP `400 missing-param` | `/update/apply` 缺 `moduleName`，或 `/update/ignore` 缺 `version` | `index.js:2112, 2136-2137` |
+| 「可用更新」一直是空 | `pluginManager` 没注入（`updates` 保持空 + warn，`index.js:2412-2421`）；或 `timer` 没注入（完全不巡检，`index.js:2423-2447`）；或没有真正的新版本（`compareVersions(result.latest, installed) <= 0` 不算更新，`index.js:1319`）；或这个包**根本没被查**：`installed !== true`、来源是 `link:` / `file:` / `github:`、或 registry 上 404（`index.js:1291-1306`） |
+| 更新记录里只有 `checked` 汇总、没有单个包 | 巡检跑到了，但一个包都没查（全被上面那些条件跳过）—— 汇总的 detail 里写明了各跳过了几个、失败几个 | `index.js:1228-1252` |
+| 忽略名单重启就没了 | **不会**：task-19 起 `/update/ignore` 会把 `ignoredUpdates` 落盘到设置文件；真丢了就查设置文件是不是被删了或写盘失败 | `index.js:1554-1565` |
 
 ### 9.5 修复被拒
 
@@ -1018,8 +1048,8 @@ plugin_manager remove_bundle target=dsh-bug-reporter
 - **不会删除** `$DSH_HOME/bug-reports.jsonl`，报告留着（`README.md:294`；`index.js` 全文件没有任何
   删除报告文件的代码路径）。
 - **也不会删除**设置文件 `bug-reporter-settings.json`（同样没有删它的路径，只有「恢复默认」会删）。
-- 卸载后「Bug 报告」页消失，`/bug-reporter/*` 路由不再注册（`scoped.effect`，`index.js:2047-2050` 被 dispose），
-  process 监听器被摘掉（`process.removeListener`，`index.js:2002-2011`）。
+- 卸载后「Bug 报告」页消失，`/bug-reporter/*` 路由不再注册（`scoped.effect`，`index.js:2376-2379` 被 dispose），
+  process 监听器被摘掉（`process.removeListener`，`index.js:2331-2340`）。
 - 想彻底清干净：先卸载，再手动删除 `$DSH_HOME/bug-reports.jsonl` 与
   `$DSH_HOME/bug-reporter-settings.json`（以及可能残留的 `*.bug-reporter.tmp`）。
 - 重装后行为：报告文件还在就**沿用**；设置**也会沿用**（设置文件还在），
@@ -1033,9 +1063,9 @@ plugin_manager remove_bundle target=dsh-bug-reporter
 
 | 文件 | 行数 | 作用 |
 |---|---|---|
-| `index.js` | 2165 | **宿主半区**：捕获、存储、设置持久化、路径围栏、GitHub、版本巡检、HTTP 路由。导出 `apply(ctx, rawConfig)`（`1842`）与 `internals`（`2127`） |
+| `index.js` | 2503 | **宿主半区**：捕获、存储、设置持久化、路径围栏、GitHub、版本巡检、HTTP 路由。导出 `apply(ctx, rawConfig)`（`2171`）与 `internals`（`2456`） |
 | `client.js` | 1238 | **浏览器半区**：`window.__ModuleLoader__.load({ id: 'dsh-bug-reporter', factory(require) })`（`18-21`），`react` 从浏览器模块表 `require`；无构建步骤，**不用 JSX**，全部 `React.createElement`（`9-16`）；注册 `settings.section`（`1229-1234`） |
-| `package.json` | 35 | 包元数据 + `dsh.bundle.patch` + `dsh.client` + `exports` / `files`（`9-34`） |
+| `package.json` | 36 | 包元数据 + `dsh.bundle.patch` + `dsh.client` + `exports` / `files`（`9-34`） |
 | `cordis.patch.yml` | 50 | bundle 补丁：**只 insert 一行**（`47-50`），并在注释里列出 15 个可调项与 5 个软依赖（`5-41`） |
 | `locale/zh.json`、`locale/en.json` | 36 / — | `meta.title` / `meta.description`，以及一份 `ui.updates.*` 文案表（`locale/zh.json:6-35`） |
 | `icon.svg` | — | 设置页图标 |
@@ -1058,26 +1088,26 @@ plugin_manager remove_bundle target=dsh-bug-reporter
 | `webServer` | `index.js:2042-2057` | 注册 `/bug-reporter` 前缀路由；句柄也存进 `services` 供同源比对 | 没有设置页数据接口（捕获与存储照常） |
 | `credentials` | `index.js:2060-2068` | `resolve(tokenRef)` 取 GitHub token | 提交 PR 时只能退到 `gh auth token` |
 | `clientModules` | `index.js:2071-2080` | `clientPath(id)` 定位插件包目录；`rebuilt(包名)` 触发热重载 | `/repair` 无法定位归属包（除非配 `repairRoots`），且不会热重载 |
-| `pluginManager` | `index.js:2083-2091` | `listBundles` / `inspect` / `installBundle` | 不巡检，`updates` 保持空数组并记一条 warn（`index.js:1042-1046`） |
+| `pluginManager` | `index.js:2412-2421` | `listBundles`（拿已装版本与来源）/ `removeBundle`（先摘旧依赖）/ `installBundle`（装新版） | 不巡检，`updates` 保持空数组并记一条 warn（此时 `/update/apply` 也会因为列表为空而 404 `unknown-module`） |
 | `timer` | `index.js:2094-2116` | 首次 3 秒巡检 + 按 `updateCheckMs` 轮询 | 完全不巡检（`index.js:2100-2108`） |
 
 每个注入点都用 `scoped.effect(...)` 注册了 dispose（把 `services.*` 置回 `null`），所以服务下线后
-handler 不会拿着旧句柄（`scoped.effect` 的 `index.js:2051-2056, 2062-2067, 2073-2078, 2085-2090, 2100-2115`）。
+handler 不会拿着旧句柄（`scoped.effect` 的 `index.js:2380-2385, 2391-2396, 2402-2407, 2414-2419, 2429-2444`）。
 
 ### 11.4 测试 / 排障用的内部句柄
 
-`internals`（`index.js:2127-2165`）导出：`resolveConfig`、`fingerprintOf`、`normalizeReport`、
+`internals`（`index.js:2456-2503`）导出：`resolveConfig`、`fingerprintOf`、`normalizeReport`、
 `findOwningPackage`、`prBody`、`slugify`、`createStore`、`DEFAULTS`、`ROUTE_PREFIX`、
 `createUpdateManager`、`compareVersions`、`parseVersion`、`updateKind`、`policyAllows`、
 `UPDATE_POLICIES`、`MIN_UPDATE_CHECK_MS`、`MAX_UPDATE_LOG`，以及：
 
 | 成员 | 用途 | 行号 |
 |---|---|---|
-| `active` | 最近一次 `apply()` 的内部状态 `{store, settings, services, reloadEvents, capture, syncProcessHooks, updates}`；没 apply 过就是 `null` | `2146-2147` |
-| `setFetch(fn)` | 替换 `fetch`（传 `null` 恢复 `globalThis.fetch`） | `2148-2151, 168-172` |
-| `setGhTokenRunner(fn)` | 替换 `gh auth token` | `2152-2155, 174-176` |
-| `resetOverrides()` | 恢复两个外部调用 | `2156-2160` |
-| `reloads()` | 热重载观察记录副本（最多 50 条） | `2161-2164` |
+| `active` | 最近一次 `apply()` 的内部状态 `{store, settings, services, reloadEvents, capture, syncProcessHooks, updates}`；没 apply 过就是 `null` | `2346-2351` |
+| `setFetch(fn)` | 替换 `fetch`（传 `null` 恢复 `globalThis.fetch`） | `2481-2484, 168-172` |
+| `setGhTokenRunner(fn)` | 替换 `gh auth token` | `2485-2488, 174-176` |
+| `resetOverrides()` | 恢复两个外部调用 | `2489-2498` |
+| `reloads()` | 热重载观察记录副本（最多 50 条） | `2499-2502` |
 
 ### 11.5 客户端实现细节
 
@@ -1132,14 +1162,14 @@ handler 不会拿着旧句柄（`scoped.effect` 的 `index.js:2051-2056, 2062-20
 
 - **已验证**：`/repair` 的围栏、原子写、`fix` 字段（`reloaded` / `rev`）在假 `clientModules` 下的取值。
 - **未验证**：**「修复后浏览器半区真的热重载」这条端到端行为没有真实验证**。
-  真实 `rebuilt()` 返回什么、浏览器是否真的换到新一代 bundle，都没有跑过（`index.js:1424-1435` 只做
+  真实 `rebuilt()` 返回什么、浏览器是否真的换到新一代 bundle，都没有跑过（`index.js:1624-1635` 只做
   「返回值是字符串就算成功」的判定）。
 
 ### 12.3 `fetch` 全是假的
 
 - **已验证**：GitHub 调用的**顺序**、请求体形状、状态码到错误码的映射（用假 `fetch` 注入）。
 - **未验证**：真实网络错误路径——**DNS 解析失败 / TLS 失败 / 超时 / 连接重置**都没有覆盖。
-  这些情况会走 `index.js:1513-1516` 兜底成 `502 github-error`，但那条分支没有用真实网络触发过。
+  这些情况会走 `index.js:1713-1716` 兜底成 `502 github-error`，但那条分支没有用真实网络触发过。
 
 ### 12.4 `uncaughtException` 的「不吞掉」是**有条件**的
 
@@ -1147,7 +1177,7 @@ README 第 234-240 行的说法是「只记录，不改默认行为：记录之�
 按实测，这个说法**要带上前提**：
 
 - 插件做的事是「记录 → `process.removeListener` 摘掉自己 → `setImmediate` 里把原始值抛回」
-  （`index.js:1836-1847`）。
+  （`index.js:2036-2047`）。
 - **当插件之后还注册了别的 `uncaughtException` 监听器时，抛回会被那个监听器接住，Node 默认的致命路径
   不再触发。** 我实跑 `test/verify-bug-proc.mjs` 得到：
   - `P1`（只有插件的监听器）：**实际退出码 = 1**，stderr 含原始错误，报告存下 1 条
@@ -1158,7 +1188,7 @@ README 第 234-240 行的说法是「只记录，不改默认行为：记录之�
 - 结论：退出码 0 是 **Node 的监听器语义**（只要有 `uncaughtException` 监听器，默认致命路径就不触发），
   不是插件把异常吞了——对照组复刻出完全一样的行为。
 - 因此「只记录，不吞掉」在**插件是最后一个/唯一监听器**时成立；宿主或别的插件再挂一个监听器时，
-  进程不会因这个异常退出。`unhandledRejection` 同理（`index.js:1849-1861`）。
+  进程不会因这个异常退出。`unhandledRejection` 同理（`index.js:2049-2061`）。
 
 ### 12.5 我在写本文时另外实测到、后续任务已处理的两点
 
@@ -1173,8 +1203,8 @@ README 第 234-240 行的说法是「只记录，不改默认行为：记录之�
 
 ### 12.6 其他没有验证到的点
 
-- `hmr/reload` 的观察记录（`index.js:1819-1828`）没有真实事件驱动过，`reloads()` 的返回形状只在桩测里看过。
-- `POST /state` 改 `captureProcess` 之后 `syncProcessHooks()` 的真实重挂行为（`index.js:1560, 1863-1875`）
+- `hmr/reload` 的观察记录（`index.js:2019-2028`）没有真实事件驱动过，`reloads()` 的返回形状只在桩测里看过。
+- `POST /state` 改 `captureProcess` 之后 `syncProcessHooks()` 的真实重挂行为（`index.js:1760, 2063-2075`）
   只在桩测里跑过，没有在真宿主里验证「关掉后真的不再记录进程异常」。
 - `updateCheckMs` 的真实轮询节奏（默认 1 小时）没有长时间跑过；`FIRST_UPDATE_CHECK_MS = 3000` 的
   首次巡检只在桩测里观察。

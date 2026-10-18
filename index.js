@@ -1038,6 +1038,123 @@ function policyAllows(policy, kind) {
   return allowed.has(kind)
 }
 
+// ---------------------------------------------------------------------------
+// registry 查询（task-21）
+//
+// `pluginManager.inspect()` 是「这个 spec 能不能装」的接口：**已装**的包一律 refused
+// （`PluginInspectProblem` 里就有 `already-installed`），所以它永远给不出「有没有新版」。
+// 最新版只能直接问 registry 的 `dist-tags.latest`：只用全局 `fetch`（经 `doFetch`，测试可替换），
+// 不 import 任何宿主模块，也不新增依赖。
+// ---------------------------------------------------------------------------
+
+/** 单个 registry 的查询超时。 */
+const REGISTRY_TIMEOUT_MS = 8000
+
+/** `registries()` 说 registry 是 `null`（「pnpm 自己配置的那个」）时的兜底地址。 */
+const REGISTRY_FALLBACK = 'https://registry.npmjs.org'
+
+/** `link:` / `file:` / `github:` 这类来源在 registry 上查不到，静默跳过（不刷警告）。 */
+const NON_REGISTRY_SOURCE = /(?:^|[@\s])(?:link|file|github|git|workspace|portal):/i
+
+/** 覆盖 registry 查询超时（测试用）；非正数表示用 `REGISTRY_TIMEOUT_MS`。 */
+let registryTimeoutOverride = null
+
+/** 当前生效的 registry 查询超时。 */
+function registryTimeoutMs() {
+  return typeof registryTimeoutOverride === 'number' && registryTimeoutOverride > 0
+    ? registryTimeoutOverride
+    : REGISTRY_TIMEOUT_MS
+}
+
+/** 带超时的 signal；运行时没有 `AbortSignal.timeout` 就不带（不抛）。 */
+function timeoutSignal(ms) {
+  try {
+    if (typeof AbortSignal === 'function' && typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms)
+  } catch {
+    // 退化成不带超时
+  }
+  return undefined
+}
+
+/** scoped 包名（`@scope/name`）要转义成 `@scope%2Fname`。 */
+function encodePackageName(moduleName) {
+  return moduleName.startsWith('@') ? moduleName.replace('/', '%2F') : moduleName
+}
+
+/** 错误信息文本（任何输入都不抛）。 */
+function errorText(error) {
+  if (error instanceof Error && typeof error.message === 'string' && error.message !== '') return error.message
+  return String(error)
+}
+
+/**
+ * 直接问 registry 要一个包的 `dist-tags.latest`，依次尝试 `registries` 里的每个地址。
+ *
+ * - `{ latest }`：查到的最新版
+ * - `{ missing: true }`：每个 registry 都 404（`link:` / `file:` / `github:` 来源会走这里）
+ * - `{ failed: true, reason }`：超时 / 非 200 / 坏 JSON / 网络异常 —— 调用方 `warn` 后跳过
+ *
+ * 任何异常都在内部吞掉，绝不外抛。
+ *
+ * @param {string} moduleName
+ * @param {string[]} registries
+ * @returns {Promise<{latest: string} | {missing: true} | {failed: true, reason: string}>}
+ */
+async function fetchLatestVersion(moduleName, registries) {
+  const encoded = encodePackageName(moduleName)
+  let reason = ''
+  let missingEverywhere = true
+  let attempts = 0
+  for (const base of registries) {
+    const url = `${String(base).replace(/\/+$/, '')}/${encoded}`
+    attempts += 1
+    let response
+    try {
+      response = await doFetch(url, {
+        headers: { accept: 'application/json' },
+        signal: timeoutSignal(registryTimeoutMs()),
+      })
+    } catch (error) {
+      missingEverywhere = false
+      reason = `请求失败：${errorText(error)}`
+      continue
+    }
+    try {
+      if (response === null || typeof response !== 'object') {
+        missingEverywhere = false
+        reason = '响应形状不对'
+        continue
+      }
+      // 404：这个 registry 上没有这个包 → 试下一个；全 404 才算「registry 上没有」。
+      if (response.status === 404) {
+        reason = 'HTTP 404'
+        continue
+      }
+      if (response.ok !== true) {
+        missingEverywhere = false
+        reason = `HTTP ${response.status}`
+        continue
+      }
+      const body = await response.json()
+      const distTags = body !== null && typeof body === 'object' ? body['dist-tags'] : undefined
+      const latest = distTags !== null && typeof distTags === 'object' ? distTags.latest : undefined
+      if (typeof latest !== 'string' || latest.trim() === '') {
+        missingEverywhere = false
+        reason = 'dist-tags.latest 缺失'
+        continue
+      }
+      return { latest: latest.trim() }
+    } catch (error) {
+      // 坏 JSON / body 读不出来
+      missingEverywhere = false
+      reason = `响应不可用：${errorText(error)}`
+      continue
+    }
+  }
+  if (attempts > 0 && missingEverywhere) return { missing: true }
+  return { failed: true, reason: reason === '' ? '没有可用的 registry' : reason }
+}
+
 /**
  * 版本巡检与更新。`pluginManager` 是软依赖：拿不到就保持空 updates + 记一条 log，
  * 绝不抛错。所有外部调用各自 try/catch，单个包失败不影响其余包。
@@ -1078,10 +1195,66 @@ function createUpdateManager(settings, services, onWarn, onSettingsChanged) {
     current = current.map((item) => ({ ...item, ignored: ignored.has(`${item.moduleName}@${item.latest}`) }))
   }
 
-  /** 巡检一次：listBundles → 逐个 inspect → 比较版本。 */
+  /** 这一轮要问的 registry 列表：配置的 → fallbackRegistries → pnpm 实际在用的 → npmjs。 */
+  async function registryList(pm) {
+    let info = null
+    try {
+      if (typeof pm.registries === 'function') info = await pm.registries()
+    } catch (error) {
+      onWarn(error)
+    }
+    const list = []
+    const push = (value) => {
+      const text = typeof value === 'string' ? value.trim() : ''
+      if (text !== '' && !list.includes(text)) list.push(text)
+    }
+    if (info !== null && typeof info === 'object') {
+      // `registry: null` = 「pnpm 自己配置的那个」，这时 `resolved` 才是它现在真正在用的地址。
+      push(info.registry)
+      if (Array.isArray(info.fallbackRegistries)) for (const item of info.fallbackRegistries) push(item)
+      if (list.length === 0) push(info.resolved)
+    }
+    if (list.length === 0) push(REGISTRY_FALLBACK)
+    return list
+  }
+
+  /** 上一轮写进 log 的巡检汇总（一样的就不重复写，免得定时巡检刷满日志）。 */
+  let lastScanKey = ''
+
+  /**
+   * 把这一轮**查了什么**记进 updateLog —— 让人能区分「真的都是最新」和「根本查不动」。
+   * 每轮最多一条；连续两轮结果完全相同就不重复写。
+   */
+  function recordScan(registries, queried, failed, found, skippedForeign, skippedNonRegistry, skippedMissing) {
+    const attempted = queried.length + failed.length
+    const allFailed = attempted > 0 && queried.length === 0
+    const shown = queried.slice(0, 6).map((item) => `${item.moduleName} ${item.installed}=${item.latest}`)
+    if (queried.length > 6) shown.push(`…还有 ${queried.length - 6} 个`)
+    const detail = [
+      `registry=${registries.join(' → ')}`,
+      `跳过 installed=false ${skippedForeign} 个、非 registry 来源 ${skippedNonRegistry} 个、registry 上 404 ${skippedMissing} 个`,
+    ]
+    if (failed.length > 0) {
+      detail.push(`失败 ${failed.length} 个：${failed.map((item) => `${item.moduleName}（${item.reason}）`).join('；')}`)
+    }
+    if (shown.length > 0) detail.push(`逐个：${shown.join('；')}`)
+    const key = `${allFailed ? 'check-failed' : 'checked'}|${attempted}|${detail.join('|')}`
+    if (key === lastScanKey) return
+    lastScanKey = key
+    const to =
+      attempted === 0 ? '没有可查的包' : allFailed ? '0 个查到' : found.length > 0 ? `${found.length} 个有更新` : '都是最新'
+    record('(registry)', `${attempted} 个包`, to, allFailed ? 'check-failed' : 'checked', detail.join('；'))
+  }
+
+  /**
+   * 巡检一次：listBundles → 只挑 profile 自己的已装包 → 逐个问 registry 的 `dist-tags.latest` → 比版本。
+   *
+   * task-21：**不再**用 `inspect()` 当「最新版」的来源（它对已装包一律 `already-installed` refused，
+   * 会让 `updates` 恒为空）。
+   */
   async function check() {
     const pm = manager()
-    if (pm === null || typeof pm.listBundles !== 'function' || typeof pm.inspect !== 'function') {
+    if (pm === null || typeof pm.listBundles !== 'function') {
       current = []
       lastCheckAt = Date.now()
       onWarn(new Error('dsh-bug-reporter: pluginManager 不可用，版本巡检跳过（updates 保持空数组）'))
@@ -1099,7 +1272,14 @@ function createUpdateManager(settings, services, onWarn, onSettingsChanged) {
     }
 
     const ignored = ignoredSet()
+    const registries = await registryList(pm)
     const found = []
+    const queried = []
+    const failed = []
+    let skippedForeign = 0
+    let skippedNonRegistry = 0
+    let skippedMissing = 0
+
     for (const bundle of Array.isArray(bundles) ? bundles : []) {
       const moduleName =
         bundle !== null && typeof bundle === 'object' && typeof bundle.name === 'string' ? bundle.name : ''
@@ -1107,34 +1287,151 @@ function createUpdateManager(settings, services, onWarn, onSettingsChanged) {
         bundle !== null && typeof bundle === 'object' && typeof bundle.version === 'string' ? bundle.version : ''
       // 没名字或没版本（例如 not-bundle 行）的跳过。
       if (moduleName === '' || installed === '') continue
-      let latest = ''
-      try {
-        const inspected = await pm.inspect(moduleName)
-        // refused / 形状不对 → 这个包不进 updates，也不影响别的包。
-        if (inspected === null || inspected === undefined || inspected.status !== 'accepted') continue
-        latest = typeof inspected.version === 'string' ? inspected.version : ''
-      } catch (error) {
-        onWarn(error)
+      // 只查 profile 自己装的包：installation-provided（`@deepseek-ai/*` 那批）跟着宿主版本走，报了也装不了。
+      if (bundle.installed !== true) {
+        skippedForeign += 1
         continue
       }
-      // 没有最新版、或最新版不比已装的新（含降级）→ 不算可用更新。
-      if (latest === '' || compareVersions(latest, installed) <= 0) continue
+      // `link:` / `file:` / `github:` 来源在 registry 上不存在 → 静默跳过。
+      if (NON_REGISTRY_SOURCE.test(typeof bundle.source === 'string' ? bundle.source : '')) {
+        skippedNonRegistry += 1
+        continue
+      }
+
+      const result = await fetchLatestVersion(moduleName, registries)
+      if (result.missing === true) {
+        // registry 上查不到（本地目录 / git 装的东西）→ 静默跳过，不刷警告。
+        skippedMissing += 1
+        continue
+      }
+      if (result.failed === true) {
+        failed.push({ moduleName, reason: result.reason })
+        onWarn(new Error(`dsh-bug-reporter: 查 ${moduleName} 最新版失败（${result.reason}）`))
+        const key = `check-failed:${moduleName}:${result.reason}`
+        if (!skipLogged.has(key)) {
+          skipLogged.add(key)
+          record(moduleName, installed, '', 'check-failed', result.reason)
+        }
+        continue
+      }
+      queried.push({ moduleName, installed, latest: result.latest })
+      // 最新版不比已装的新（含降级）→ 不算可用更新。
+      if (compareVersions(result.latest, installed) <= 0) continue
       found.push({
         moduleName,
         installed,
-        latest,
-        kind: updateKind(installed, latest),
-        ignored: ignored.has(`${moduleName}@${latest}`),
+        latest: result.latest,
+        kind: updateKind(installed, result.latest),
+        ignored: ignored.has(`${moduleName}@${result.latest}`),
       })
     }
+
     current = found
     lastCheckAt = Date.now()
+    recordScan(registries, queried, failed, found, skippedForeign, skippedNonRegistry, skippedMissing)
     return current
   }
 
+  /** 一次 pluginManager 调用的结果 → 归一化四元组（缺字段一律 undefined，绝不抛）。 */
+  function describeApplication(result) {
+    const bag = result !== null && typeof result === 'object' ? result : {}
+    const error = bag.error !== null && typeof bag.error === 'object' ? bag.error : {}
+    return {
+      application: typeof bag.application === 'string' ? bag.application : 'failed',
+      errorCode: typeof error.code === 'string' ? error.code : undefined,
+      version: typeof bag.version === 'string' ? bag.version : undefined,
+      restartReason: typeof bag.restartReason === 'string' ? bag.restartReason : undefined,
+    }
+  }
+
+  /** 归一化结果 → `application=… version=… restartReason=… error=…` 日志片段。 */
+  function applicationText(info) {
+    const parts = [`application=${info.application}`]
+    if (info.version !== undefined) parts.push(`version=${info.version}`)
+    if (info.restartReason !== undefined) parts.push(`restartReason=${info.restartReason}`)
+    if (info.errorCode !== undefined) parts.push(`error=${info.errorCode}`)
+    return parts.join(' ')
+  }
+
+  /** 摘不掉的错误码 → 一句人话（别指望用户认识这些码）。 */
+  function removeHint(code) {
+    switch (code) {
+      case 'not-removable':
+      case 'bundle-in-use':
+      case 'management-required':
+      case 'unaddressable':
+        return '这个包不能自动更新，请手动 `dsh plugin` 更新'
+      case 'unknown-plugin':
+        return '宿主不认识这个包名，无法更新'
+      case 'not-bundle':
+        return '这个包没有 bundle 补丁，不是可管理的 bundle'
+      case 'invalid-spec':
+        return '包名不是合法的安装 spec'
+      case 'ambiguous-install':
+        return '安装目标不唯一，无法确定要更新哪个包'
+      case 'already-installed':
+        return '宿主认为这个包已经装好了'
+      case 'stale-approval':
+        return '构建审批已过期，重试一次'
+      default:
+        return '这个包不能自动更新，请手动 `dsh plugin` 更新'
+    }
+  }
+
+  /** 更新真的落盘之后，才把这一项从「可用更新」里摘掉（失败时保留，用户还能重试）。 */
+  function drop(moduleName) {
+    current = current.filter((candidate) => candidate.moduleName !== moduleName)
+  }
+
   /**
-   * 装一个包。硬错误（pluginManager 没了 / installBundle 抛了）往外抛，由路由转成
-   * `operation-failed`；软失败（application 是 failed / cancelled / overridden）只记 log。
+   * 补救重装：remove 已经把包摘掉了，install 再失败就是「包没了」的最危险状态。
+   * 再试一次，结果原样带回（绝不抛）。
+   */
+  async function retryInstall(pm, moduleName) {
+    try {
+      const info = describeApplication(await pm.installBundle(moduleName))
+      return { info, text: `补救重装 ${applicationText(info)}` }
+    } catch (error) {
+      return {
+        info: { application: 'failed', errorCode: undefined, version: undefined, restartReason: undefined },
+        text: `补救重装也抛错：${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
+  /**
+   * 「remove 成功但 install 没成」的统一记账 —— 这是最危险的失败：包已经被摘掉了。
+   * 补救装上了就如实记 applied / restart-required；补救也失败才记 failed，并把
+   * 「已移除但重装失败，需要手动重装」写进 detail。
+   */
+  function recordDangerousFailure(moduleName, from, to, firstText, retry) {
+    const detail = `remove=applied 首次 install ${firstText}；${retry.text}`
+    if (retry.info.application === 'applied') {
+      record(moduleName, from, to, 'applied', detail)
+      drop(moduleName)
+      return { application: 'applied', outcome: 'applied' }
+    }
+    if (retry.info.application === 'restart-required') {
+      record(moduleName, from, to, 'restart-required', detail)
+      drop(moduleName)
+      return { application: 'restart-required', outcome: 'restart-required' }
+    }
+    record(moduleName, from, to, 'failed', `${detail} —— 已移除但重装失败，需要手动重装（\`dsh plugin\`）`)
+    return { application: 'failed', outcome: 'failed' }
+  }
+
+  /**
+   * 装一个包：**先 removeBundle 再 installBundle**。
+   *
+   * task-22：不能直接 `installBundle`。宿主有 HMR 时，installBundle 对「已经是 profile
+   * 依赖」的包一律抛 `already-installed`（@deepseek-ai/dsh-plugin-manager lib/index.js:1991
+   * 的守卫），所以一键更新装了等于没装。正确路径是先 `removeBundle(name)` 把依赖摘掉，
+   * 再 `installBundle(name)` 装回来 —— 这正是 plugin_manager install_bundle 自己给的
+   * nextStep：「call remove_bundle first, then install_bundle again」。
+   *
+   * 每一步都如实记账，只有 installBundle 的 `application === 'applied'` 才记 applied，
+   * `restart-required` 如实记，其余一律 failed（绝不谎报）。硬错误（pluginManager 没了 /
+   * 两步里任何一步抛了）往外抛，由路由转成 `operation-failed`。
    */
   async function applyOne(moduleName) {
     const pm = manager()
@@ -1145,35 +1442,67 @@ function createUpdateManager(settings, services, onWarn, onSettingsChanged) {
     const from = item === undefined ? '' : item.installed
     const to = item === undefined ? '' : item.latest
 
-    let result
+    // 1) 先摘掉旧依赖。没有 removeBundle（老宿主）就别硬着头皮 install —— 那只会再撞
+    //    already-installed，等于什么都没做。
+    if (typeof pm.removeBundle !== 'function') {
+      record(
+        moduleName,
+        from,
+        to,
+        'failed',
+        'removeBundle 不可用（宿主太旧）：没法先摘掉旧依赖，而 installBundle 对已装包一律 already-installed；请手动 `dsh plugin` 更新',
+      )
+      return { application: 'failed', outcome: 'failed' }
+    }
+
+    let removed
     try {
-      result = await pm.installBundle(moduleName)
+      removed = await pm.removeBundle(moduleName)
     } catch (error) {
-      record(moduleName, from, to, 'failed', error instanceof Error ? error.message : String(error))
+      record(moduleName, from, to, 'failed', `removeBundle 抛错：${error instanceof Error ? error.message : String(error)}`)
       throw error
     }
 
-    const application =
-      result !== null && typeof result === 'object' && typeof result.application === 'string'
-        ? result.application
-        : 'failed'
-    // 只有 applied 才算真的生效；restart-required 如实记下来，不谎报。
-    const outcome =
-      application === 'applied' ? 'applied' : application === 'restart-required' ? 'restart-required' : 'failed'
-    const detail = [`application=${application}`]
-    if (result !== null && typeof result === 'object') {
-      if (typeof result.version === 'string') detail.push(`version=${result.version}`)
-      if (typeof result.restartReason === 'string') detail.push(`restartReason=${result.restartReason}`)
-      const errorCode =
-        result.error !== null && result.error !== undefined && typeof result.error === 'object'
-          ? result.error.code
-          : undefined
-      if (typeof errorCode === 'string') detail.push(`error=${errorCode}`)
+    const removeInfo = describeApplication(removed)
+    if (removeInfo.errorCode !== undefined) {
+      // 摘不掉 —— 这一步失败时包还在原地，停手最安全（不要 install）。
+      if (removeInfo.errorCode === 'stop-profile') {
+        record(
+          moduleName,
+          from,
+          to,
+          'restart-required',
+          `remove=restart-required error=stop-profile 需要重启 profile 之后才能更新（这次没有改动任何东西）`,
+        )
+        return { application: 'restart-required', outcome: 'restart-required' }
+      }
+      record(moduleName, from, to, 'failed', `remove=failed error=${removeInfo.errorCode}：${removeHint(removeInfo.errorCode)}`)
+      return { application: removeInfo.application, outcome: 'failed' }
     }
-    record(moduleName, from, to, outcome, detail.join(' '))
-    // 装过之后就不再是「可用更新」。
-    current = current.filter((candidate) => candidate.moduleName !== moduleName)
-    return { application, outcome }
+
+    // 2) 装回来。没有 error 就说明旧依赖已经摘掉了（application 可能是 applied，
+    //    也可能是 no-hmr 的 restart-required —— 两种都必须装回去，否则包就没了）。
+    let installed
+    try {
+      installed = await pm.installBundle(moduleName)
+    } catch (error) {
+      const retry = await retryInstall(pm, moduleName)
+      recordDangerousFailure(moduleName, from, to, `抛错：${error instanceof Error ? error.message : String(error)}`, retry)
+      throw error
+    }
+
+    const installInfo = describeApplication(installed)
+    if (installInfo.application !== 'applied' && installInfo.application !== 'restart-required') {
+      // 软失败（failed / cancelled / …）：包已经被摘掉了，先补救重装一次。
+      const retry = await retryInstall(pm, moduleName)
+      return recordDangerousFailure(moduleName, from, to, applicationText(installInfo), retry)
+    }
+
+    // 只有 applied 才算真的生效；restart-required 如实记下来，不谎报。
+    const outcome = installInfo.application === 'applied' ? 'applied' : 'restart-required'
+    record(moduleName, from, to, outcome, `remove=${removeInfo.application} ${applicationText(installInfo)}`)
+    drop(moduleName)
+    return { application: installInfo.application, outcome }
   }
 
   /** autoUpdate 打开时按 updatePolicy 自动装；被忽略 / 不在策略内的只记一次 skipped。 */
@@ -2145,6 +2474,10 @@ export const internals = {
   MAX_UPDATE_LOG,
   /** 最近一次 apply 的内部状态；没有 apply 过就是 null。 */
   active: null,
+  // task-21：registry 查询的可测单元。
+  fetchLatestVersion,
+  encodePackageName,
+  REGISTRY_TIMEOUT_MS,
   /** 替换 fetch（传 null 恢复 globalThis.fetch）。 */
   setFetch(fn) {
     fetchOverride = fn === undefined ? null : fn
@@ -2153,10 +2486,15 @@ export const internals = {
   setGhTokenRunner(fn) {
     ghTokenOverride = fn === undefined ? null : fn
   },
-  /** 恢复两个外部调用。 */
+  /** 覆盖 registry 查询超时（传 null / 非正数恢复 REGISTRY_TIMEOUT_MS）。 */
+  setRegistryTimeout(ms) {
+    registryTimeoutOverride = typeof ms === 'number' && ms > 0 ? ms : null
+  },
+  /** 恢复三个外部调用/覆盖。 */
   resetOverrides() {
     fetchOverride = null
     ghTokenOverride = null
+    registryTimeoutOverride = null
   },
   /** 热重载观察记录（副本）。 */
   reloads() {

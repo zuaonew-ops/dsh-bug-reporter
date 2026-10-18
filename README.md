@@ -83,13 +83,17 @@ token 从 DSH 凭据 `GITHUB_TOKEN` 取（可改），取不到再退到 `gh aut
 
 挂载后约 **3 秒**先主动查一次，之后按 `updateCheckMs`（默认 1 小时）轮询。
 
-版本信息全部走 DSH 的 `pluginManager` 服务，**不自己写 HTTP 去查 npm**：
-
-| 目的 | 调用 |
+| 目的 | 怎么拿 |
 |---|---|
-| 已装版本 | `pluginManager.listBundles()` |
-| 仓库里的最新版 | `pluginManager.inspect(包名)` 的 `version` |
-| 安装新版本 | `pluginManager.installBundle(包名)` |
+| 已装版本 | `pluginManager.listBundles()`（顺带拿到 `installed` / `source`） |
+| registry 上的最新版 | 自己查 `GET <registry>/<包名>` 的 `dist-tags.latest`（只查 `installed:true` 且来源是 registry 的包；404 静默跳过，带 `AbortSignal` 超时） |
+| 摘掉旧依赖 | `pluginManager.removeBundle(包名)` |
+| 装新版本 | `pluginManager.installBundle(包名)` |
+
+**一键更新是「先摘、再装」两步**，不能只调 `installBundle`：宿主有 HMR 时，
+`installBundle` 对「已经是 profile 依赖」的包一律抛 `already-installed`
+（`@deepseek-ai/dsh-plugin-manager` 里 `installBundle` 的守卫），装了等于没装 ——
+这正是「点了更新但什么都没变」的原因。`removeBundle` 自己的 `nextStep` 也是这么说的。
 
 比对用自写的语义化版本比较（认 `v` 前缀、`+build`，且预发布版正确判低于正式版），
 并给出更新类型 `patch` / `minor` / `major`。
@@ -99,6 +103,12 @@ token 从 DSH 凭据 `GITHUB_TOKEN` 取（可改），取不到再退到 `gh aut
   （`patch` 只装补丁版 / `minor` 装小版本 / `any` 全装）。
 - 不想再看到某个版本，点「忽略」；忽略记录存在 `ignoredUpdates` 里，可随时取消。
 - `application` 返回 `restart-required` 时**如实记录**，不会谎报已生效。
+- 更新**失败时那一项留在「可用更新」列表里**（可以直接再点一次），只有真的装上了才消失。
+- 摘不掉时（`not-removable` / `bundle-in-use` / `management-required` / `unaddressable`）
+  会明确写「这个包不能自动更新，请手动 `dsh plugin` 更新」；`stop-profile` 记 `restart-required`
+  并提示重启 profile。
+- 最危险的一种失败是「旧依赖摘掉了、新的没装上」：这时会**自动补救重装一次**，并把
+  「**已移除但重装失败，需要手动重装**」连同具体错误写进更新记录。
 
 ## 安全模型
 
@@ -230,7 +240,7 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 | POST | `/bug-reporter/repair` | 写文件 + 热重载，报告置 `fixed` |
 | POST | `/bug-reporter/submit` | 建分支 + 提交报告 + 开 PR |
 | POST | `/bug-reporter/update/check` | 立刻巡检一次新版本 |
-| POST | `/bug-reporter/update/apply` | 装某个包的最新版 |
+| POST | `/bug-reporter/update/apply` | 装某个包的最新版（先 `removeBundle` 摘旧依赖，再 `installBundle`） |
 | POST | `/bug-reporter/update/ignore` | 忽略/取消忽略某个版本 |
 | POST | `/bug-reporter/settings/reset` | 清空界面持久化的设置、回到 `cordis.patch.yml`（**不删报告**） |
 
@@ -270,7 +280,7 @@ plugin_manager install_bundle target=D:\ai aegit\deepseek\dsh-bug-reporter
 |---|---|---|
 | `node test/bug-check.mjs` | 宿主半区桩测：配置校验 / 软依赖 / `/state` / 报告增删改清 / `/repair` / PR 链路 / process 捕获 / HTTP 协议层 | `57/57 通过` |
 | `node test/bug-client-smoke.mjs` | 客户端烟测：静态检查 + 桩 React hooks 运行时**真挂载** + 假 http 宿主 + 失败路径 | `ALL PASS` |
-| `node test/bug-update-check.mjs` | 更新链路 + 设置持久化（含 D14 的 49 条：坏 JSON / 未知键 / ENOENT / reset） | `ALL PASS（PASS 257 / FAIL 0）` |
+| `node test/bug-update-check.mjs` | 更新链路 + 设置持久化（含 D14 的 49 条：坏 JSON / 未知键 / ENOENT / reset；G 段 58 条：先摘后装的每一步失败模式） | `ALL PASS（PASS 359 / FAIL 0）` |
 | `node test/verify-bug-http.mjs` | **独立验证**：把 handler 挂到真 socket，用真 `fetch` 与真 `curl` 打 | `PASS 18 / FAIL 2 / INFO 3` |
 | `node test/verify-bug-contract.mjs` | **独立验证**：两端契约交叉核对 / 软依赖 32 组合 / 配置边界 / JSONL 损坏恢复 | `PASS 12 / FAIL 4 / INFO 3` |
 | `node test/verify-bug-proc.mjs` | **独立验证**：process 级捕获（真子进程、真退出码、监听器顺序） | `PASS 4 / FAIL 0 / INFO 3` |

@@ -12,7 +12,7 @@
  *
  * 绝不真调 installBundle —— pluginManager 全部是桩。
  *
- * 跑法：在仓库根跑 `node test/bug-update-check.mjs`
+ * 跑法：在仓库根跑 `node test/bug-update-check.mjs`（本文件是可移植副本，PLUGIN_DIR 用相对路径推出来）
  */
 
 import http from 'node:http'
@@ -57,6 +57,8 @@ const {
   findOwningPackage,
   DEFAULTS,
 } = mod.internals
+// task-21：registry 巡检要用到 internals 上的注入点与单元。
+const internals = mod.internals
 
 // ---------------------------------------------------------------------------
 // A. compareVersions / updateKind
@@ -121,15 +123,24 @@ expectThrow('ignoredUpdates 非 string[] 抛错', () => resolveConfig({ ignoredU
 // ---------------------------------------------------------------------------
 console.log('\n--- C. createUpdateManager ---')
 
+// task-21：`installed` / `source` 现在决定「查不查」——只有 profile 自己的已装包
+// （`installed === true`）且不是 `link:` / `file:` / `github:` 来源的才问 registry。
 const BUNDLES = [
-  { name: 'dsh-alpha', version: '1.0.0' },
-  { name: 'dsh-beta', version: '1.0.0' },
-  { name: 'dsh-gamma', version: '1.0.0' },
-  { name: 'dsh-delta', version: '1.0.0' },
-  { name: 'dsh-epsilon', version: '1.0.0' },
-  { name: 'dsh-zeta', version: '1.0.0' },
+  { name: 'dsh-alpha', version: '1.0.0', installed: true, source: 'dsh-alpha@^1.0.0' },
+  { name: 'dsh-beta', version: '1.0.0', installed: true, source: 'dsh-beta@^1.0.0' },
+  { name: 'dsh-gamma', version: '1.0.0', installed: true, source: 'dsh-gamma@^1.0.0' },
+  { name: 'dsh-delta', version: '1.0.0', installed: true, source: 'dsh-delta@^1.0.0' },
+  { name: 'dsh-epsilon', version: '1.0.0', installed: true, source: 'dsh-epsilon@^1.0.0' },
+  { name: 'dsh-zeta', version: '1.0.0', installed: true, source: 'dsh-zeta@^1.0.0' },
+  // installation-provided：跟着宿主版本走，报了也装不了 → 一次都不该查。
+  { name: 'dsh-provided', version: '0.1.0', installed: false, source: '@deepseek-ai/dsh-base@^0.2.1' },
+  // 本地 / git 装的包：registry 上没有 → 静默跳过，不刷警告。
+  { name: 'dsh-local', version: '1.0.0', installed: true, source: 'link:D:\\work\\dsh-local' },
+  { name: 'dsh-fromfile', version: '1.0.0', installed: true, source: 'file:D:\\work\\dsh-fromfile' },
+  { name: 'dsh-fromgit', version: '1.0.0', installed: true, source: 'github:KDDKBD/DeepSeek-splash-animation' },
   { name: 'dsh-no-version' },
 ]
+// inspect 的返回值仍留着（次要路径的桩），但 task-21 起巡检**不再**用它拿最新版。
 const INSPECTIONS = {
   'dsh-alpha': { status: 'accepted', kind: 'registry', name: 'dsh-alpha', version: '1.0.1' },
   'dsh-beta': { status: 'accepted', kind: 'registry', name: 'dsh-beta', version: '1.2.0' },
@@ -139,18 +150,71 @@ const INSPECTIONS = {
   'dsh-zeta': { status: 'accepted', kind: 'registry', name: 'dsh-zeta', version: '1.0.0' },
 }
 
-function stubManager({ installs, installResult }) {
+// ---------------------------------------------------------------------------
+// 假 registry（task-21）：插件走 doFetch，这里替换掉 fetch，绝不真发网络请求。
+// 只认 REGISTRY_HOST / FALLBACK_HOST；别的 URL 交给真 fetch（本文件里没有别的外部请求）。
+// ---------------------------------------------------------------------------
+const REGISTRY_HOST = 'https://reg.test'
+const FALLBACK_HOST = 'https://fb.test'
+const RESOLVED_HOST = 'https://resolved.test'
+const NPMJS_HOST = 'https://registry.npmjs.org'
+/** 包名 → 结果：版本字符串 | '404' | 'http-500' | 'bad-json' | 'hang'（C7 会临时换掉它） */
+let registryTable = {
+  'dsh-alpha': '1.0.1',
+  'dsh-beta': '1.2.0',
+  'dsh-gamma': '2.0.0',
+  'dsh-delta': '404',
+  'dsh-epsilon': 'http-500',
+  'dsh-zeta': '1.0.0',
+}
+const registryCalls = []
+const registryHosts = [REGISTRY_HOST, FALLBACK_HOST, RESOLVED_HOST, NPMJS_HOST]
+const realFetch = globalThis.fetch
+internals.setFetch(async (url, init) => {
+  const text = String(url)
+  if (!registryHosts.some((host) => text.startsWith(host))) return realFetch(url, init)
+  const name = decodeURIComponent(text.slice(text.lastIndexOf('/') + 1))
+  registryCalls.push({ url: text, hasSignal: init !== undefined && init !== null && init.signal instanceof AbortSignal })
+  const value = registryTable[name]
+  if (value === 'hang') {
+    // 真超时路径：挂在 signal 上，由 AbortSignal.timeout 把它打断。
+    return await new Promise((resolve, reject) => {
+      const signal = init === undefined || init === null ? undefined : init.signal
+      if (signal === undefined) reject(new Error('stub registry: 没有 signal'))
+      else signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+  }
+  if (value === 'bad-json') return { ok: true, status: 200, json: async () => { throw new Error('stub registry: 坏 JSON') } }
+  if (value === 'http-500') return { ok: false, status: 500, json: async () => ({}) }
+  if (value === undefined || value === '404') return { ok: false, status: 404, json: async () => ({ error: 'Not found' }) }
+  return { ok: true, status: 200, json: async () => ({ 'dist-tags': { latest: value } }) }
+})
+
+/** 桩 pluginManager：listBundles + registries + inspect（inspect 已不是最新版来源）+ removeBundle/installBundle。 */
+let inspectCalls = 0
+function stubManager({ installs, installResult, removes, removeResult }) {
   return {
     async listBundles() {
       return BUNDLES
     },
+    async registries() {
+      return { registry: REGISTRY_HOST, fallbackRegistries: [FALLBACK_HOST], resolved: null }
+    },
     async inspect(name) {
+      inspectCalls += 1
       if (Object.hasOwn(INSPECTIONS, name)) {
         const value = INSPECTIONS[name]
         if (value instanceof Error) throw value
         return value
       }
       return { status: 'refused', problem: 'not-found', reason: 'stub: 没有这个包' }
+    },
+    // task-22：真实契约里 removeBundle 和 installBundle 同形状（都走 change()）。
+    async removeBundle(name) {
+      if (Array.isArray(removes)) removes.push(name)
+      return typeof removeResult === 'function'
+        ? removeResult(name)
+        : { changed: true, application: 'applied', stage: 'remove', target: name }
     },
     async installBundle(name) {
       installs.push(name)
@@ -172,10 +236,23 @@ await mgr1.runCheck()
 const list1 = mgr1.list()
 const names1 = list1.map((item) => item.moduleName).sort()
 check('updates 只含 3 个真有新版的包', names1.join(',') === 'dsh-alpha,dsh-beta,dsh-gamma', `实际 ${names1.join(',')}`)
-check('inspect refused 的包不进 updates', !names1.includes('dsh-delta'))
-check('inspect 抛异常的包不进 updates（不崩）', !names1.includes('dsh-epsilon'))
+check('registry 404 的包不进 updates（静默跳过）', !names1.includes('dsh-delta'))
+check('registry 500 的包不进 updates（不崩）', !names1.includes('dsh-epsilon'))
 check('最新版 == 已装 的包不进 updates', !names1.includes('dsh-zeta'))
 check('没有 version 的 bundle 被跳过', !names1.includes('dsh-no-version'))
+// task-21 新增：查不查由 installed / source 决定
+check('installed=false 的 bundle 不进 updates', !names1.includes('dsh-provided'))
+check('installed=false 的 bundle 一次都没被查', !registryCalls.some((c) => c.url.includes('dsh-provided')))
+check('link: 来源的包不进 updates', !names1.includes('dsh-local'))
+check('file: 来源的包不进 updates', !names1.includes('dsh-fromfile'))
+check('github: 来源的包不进 updates', !names1.includes('dsh-fromgit'))
+check(
+  'link:/file:/github: 来源一次都没被查',
+  !registryCalls.some((c) => c.url.includes('dsh-local') || c.url.includes('dsh-fromfile') || c.url.includes('dsh-fromgit')),
+)
+check('巡检不再调用 inspect（已装包 inspect 一律 already-installed）', inspectCalls === 0, `实际调了 ${inspectCalls} 次`)
+check('registry 查询带了 AbortSignal（超时保护）', registryCalls.length > 0 && registryCalls.every((c) => c.hasSignal))
+check('registry 查询 URL = <registry>/<包名>', registryCalls.some((c) => c.url === `${REGISTRY_HOST}/dsh-alpha`), JSON.stringify(registryCalls[0]))
 check(
   'kind 判定：alpha=patch beta=minor gamma=major',
   list1.find((i) => i.moduleName === 'dsh-alpha').kind === 'patch' &&
@@ -195,7 +272,7 @@ check(
 )
 check('lastUpdateCheckAt > 0', mgr1.lastCheckAt() > 0)
 check('autoUpdate=false → installBundle 一次都没调', installs1.length === 0, `实际 ${installs1.length}`)
-check('inspect 抛异常时记了 log', logs1.some((line) => line.includes('stub inspect 炸了')))
+check('registry 500 时记了 warn', logs1.some((line) => line.includes('dsh-epsilon') && line.includes('HTTP 500')))
 
 // C2 ignored
 const settings2 = { ...DEFAULTS, ignoredUpdates: ['dsh-beta@1.2.0'] }
@@ -333,6 +410,233 @@ console.log('--- C6 toggleIgnore ---')
 }
 
 // ---------------------------------------------------------------------------
+// C7 registry 巡检专项（task-21）
+//
+// 根因：`inspect()` 对**已装**包一律 refused（`already-installed`），所以旧实现里
+// `status !== 'accepted'` 把每个包都 continue 掉 → updates 恒为空。
+// 这一节专门钉住新路径：最新版只从 registry 的 dist-tags.latest 拿。
+// ---------------------------------------------------------------------------
+console.log('--- C7 registry 巡检专项 ---')
+
+/** 只给 listBundles + registries 的桩：故意**不带** inspect，证明巡检不再依赖它。 */
+function managerFor(bundles, registries) {
+  return {
+    async listBundles() {
+      return bundles
+    },
+    async registries() {
+      return registries
+    },
+  }
+}
+
+/** 换掉假 registry 表 + 超时，跑一轮巡检，然后把现场恢复回去。 */
+async function scanWith({ bundles, registries, table, timeoutMs }) {
+  const savedTable = registryTable
+  const savedTimeout = internals.REGISTRY_TIMEOUT_MS
+  const before = registryCalls.length
+  registryTable = table
+  internals.setRegistryTimeout(timeoutMs === undefined ? savedTimeout : timeoutMs)
+  // `AbortSignal.timeout()` 的计时器是 unref 的：这里没别的活儿时 node 会直接退出，
+  // 所以超时用例必须自己挂一个保活计时器。
+  const keepAlive = setInterval(() => {}, 20)
+  const logs = []
+  const settings = { ...DEFAULTS, ignoredUpdates: [] }
+  const mgr = createUpdateManager(settings, { pluginManager: managerFor(bundles, registries) }, (e) =>
+    logs.push(String((e && e.message) || e)),
+  )
+  let threw = null
+  let updates = []
+  try {
+    updates = await mgr.runCheck()
+  } catch (error) {
+    threw = error
+  }
+  clearInterval(keepAlive)
+  registryTable = savedTable
+  internals.setRegistryTimeout(savedTimeout)
+  return { updates, logs, log: mgr.log(), threw, calls: registryCalls.slice(before) }
+}
+
+// C7.1 混合一轮：有新版 / 预发布 / 降级 / 超时 / 坏 JSON / 404 / scoped
+{
+  const bundles = [
+    { name: 'dsh-new', version: '1.0.0', installed: true, source: 'dsh-new@^1.0.0' },
+    { name: 'dsh-pre', version: '1.0.0-rc.1', installed: true, source: 'dsh-pre@^1.0.0-rc.1' },
+    { name: 'dsh-lower', version: '2.0.0', installed: true, source: 'dsh-lower@^2.0.0' },
+    { name: 'dsh-timeout', version: '1.0.0', installed: true, source: 'dsh-timeout@^1.0.0' },
+    { name: 'dsh-broken', version: '1.0.0', installed: true, source: 'dsh-broken@^1.0.0' },
+    { name: 'dsh-missing', version: '1.0.0', installed: true, source: 'dsh-missing@^1.0.0' },
+    { name: '@scope/scoped', version: '1.0.0', installed: true, source: '@scope/scoped@^1.0.0' },
+  ]
+  const table = {
+    'dsh-new': '1.0.1',
+    'dsh-pre': '1.0.0',
+    'dsh-lower': '1.0.0',
+    'dsh-timeout': 'hang',
+    'dsh-broken': 'bad-json',
+    '@scope/scoped': '1.1.0',
+    // dsh-missing 故意不给 → 404
+  }
+  const run = await scanWith({
+    bundles,
+    registries: { registry: REGISTRY_HOST, fallbackRegistries: [], resolved: null },
+    table,
+    timeoutMs: 40, // 真超时：40ms，不等 8 秒
+  })
+  const names = run.updates.map((item) => item.moduleName).sort()
+  check('已装包 + registry 有新版 → 出现在 updates 里（原来挂掉的就是这条）', names.includes('dsh-new'))
+  check(
+    '  latest/kind 正确（1.0.0 → 1.0.1 = patch）',
+    run.updates.some((i) => i.moduleName === 'dsh-new' && i.latest === '1.0.1' && i.kind === 'patch'),
+    JSON.stringify(run.updates.find((i) => i.moduleName === 'dsh-new')),
+  )
+  check('scoped 包名转义成 @scope%2Fname', run.calls.some((c) => c.url === `${REGISTRY_HOST}/@scope%2Fscoped`), JSON.stringify(run.calls.map((c) => c.url)))
+  check('scoped 包也能进 updates', names.includes('@scope/scoped'))
+  check('预发布版比较：1.0.0-rc.1 → 1.0.0 算可用更新', names.includes('dsh-pre'))
+  check('latest 比已装旧（降级）→ 不算可用更新', !names.includes('dsh-lower'))
+  check('registry 超时的包不进 updates（不崩）', run.threw === null && !names.includes('dsh-timeout'))
+  check('  超时记了 warn', run.logs.some((line) => line.includes('dsh-timeout')))
+  check('坏 JSON 的包不进 updates（不崩）', !names.includes('dsh-broken'))
+  check('  坏 JSON 记了 warn', run.logs.some((line) => line.includes('dsh-broken')))
+  check('registry 404 的包不进 updates 且不报错', !names.includes('dsh-missing') && !run.logs.some((line) => line.includes('dsh-missing')))
+  check('单个包失败不影响同轮其它包（3 个有更新）', names.join(',') === '@scope/scoped,dsh-new,dsh-pre', `实际 ${names.join(',')}`)
+  const summary = run.log.filter((entry) => entry.moduleName === '(registry)')
+  check('updateLog 有一条 (registry) 汇总（result=checked）', summary.length === 1 && summary[0].result === 'checked', JSON.stringify(summary))
+  check(
+    '  汇总逐个列出查过的包（可核查「真的都是最新」还是「根本查不动」）',
+    summary.length === 1 &&
+      String(summary[0].detail).includes('dsh-new 1.0.0=1.0.1') &&
+      String(summary[0].detail).includes('dsh-lower 2.0.0=1.0.0') &&
+      String(summary[0].detail).includes('registry 上 404 1 个'),
+    summary.length === 1 ? String(summary[0].detail) : '',
+  )
+  check('  汇总里写了 registry 与跳过计数', summary.length === 1 && String(summary[0].detail).includes(`registry=${REGISTRY_HOST}`))
+  const failedEntries = run.log.filter((entry) => entry.result === 'check-failed')
+  check('失败也逐条记进 updateLog（result=check-failed）', failedEntries.length === 2, JSON.stringify(failedEntries))
+}
+
+// C7.2 同一个 manager 连续两轮完全相同 → 汇总不重复写（避免定时巡检刷满日志）
+{
+  const savedTable = registryTable
+  registryTable = { 'dsh-new': '1.0.1' }
+  const logs = []
+  const settings = { ...DEFAULTS, ignoredUpdates: [] }
+  const mgr = createUpdateManager(
+    settings,
+    {
+      pluginManager: managerFor([{ name: 'dsh-new', version: '1.0.0', installed: true, source: 'dsh-new@^1.0.0' }], {
+        registry: REGISTRY_HOST,
+        fallbackRegistries: [],
+        resolved: null,
+      }),
+    },
+    (e) => logs.push(String((e && e.message) || e)),
+  )
+  await mgr.runCheck()
+  const afterFirst = mgr.log().filter((entry) => entry.moduleName === '(registry)').length
+  await mgr.runCheck()
+  const afterSecond = mgr.log().filter((entry) => entry.moduleName === '(registry)').length
+  registryTable = savedTable
+  check('第一轮写了 (registry) 汇总', afterFirst === 1, `实际 ${afterFirst}`)
+  check('第二轮结果相同 → 不重复写', afterSecond === 1, `实际 ${afterSecond}`)
+}
+
+// C7.3 全部查询都失败 → updateLog 必须有可见记录（不许静默的 0 更新）
+{
+  const bundles = [
+    { name: 'dsh-x1', version: '1.0.0', installed: true, source: 'dsh-x1@^1.0.0' },
+    { name: 'dsh-x2', version: '1.0.0', installed: true, source: 'dsh-x2@^1.0.0' },
+  ]
+  const run = await scanWith({
+    bundles,
+    registries: { registry: REGISTRY_HOST, fallbackRegistries: [], resolved: null },
+    table: { 'dsh-x1': 'http-500', 'dsh-x2': 'bad-json' },
+  })
+  const summary = run.log.filter((entry) => entry.moduleName === '(registry)')
+  check('全部失败 → updates 为空', run.updates.length === 0)
+  check('全部失败 → updateLog 里有 result=check-failed 的可见记录', summary.length === 1 && summary[0].result === 'check-failed', JSON.stringify(summary))
+  check('  记录里写明「0 个查到」', summary.length === 1 && summary[0].to === '0 个查到', JSON.stringify(summary[0]))
+  check('  两个包都记了 warn', run.logs.length === 2)
+}
+
+// C7.4 没有任何可查的包（全是 link: / installed=false）→ 也要留可见记录
+{
+  const bundles = [
+    { name: 'dsh-local', version: '1.0.0', installed: true, source: 'link:D:\\work\\dsh-local' },
+    { name: 'dsh-provided', version: '0.1.0', installed: false, source: '@deepseek-ai/dsh-base@^0.2.1' },
+  ]
+  const run = await scanWith({
+    bundles,
+    registries: { registry: REGISTRY_HOST, fallbackRegistries: [], resolved: null },
+    table: {},
+  })
+  check('没有可查的包 → 一次 registry 请求都不发', run.calls.length === 0, JSON.stringify(run.calls))
+  check('  仍然留一条可见记录（不是静默 0 更新）', run.log.some((e) => e.moduleName === '(registry)' && e.to === '没有可查的包'))
+}
+
+// C7.5 registry 取法与兜底链
+{
+  const bundles = [{ name: 'dsh-new', version: '1.0.0', installed: true, source: 'dsh-new@^1.0.0' }]
+  const table = { 'dsh-new': '1.0.1' }
+  // registry = null（pnpm 自己配置的那个）→ 用 resolved
+  const viaResolved = await scanWith({
+    bundles,
+    registries: { registry: null, fallbackRegistries: [], resolved: RESOLVED_HOST },
+    table,
+  })
+  check('registry=null → 退化到 resolved 指的地址', viaResolved.calls.some((c) => c.url === `${RESOLVED_HOST}/dsh-new`), JSON.stringify(viaResolved.calls.map((c) => c.url)))
+  // registry = null 且没有 resolved → 用 npmjs 兜底
+  const viaNpm = await scanWith({
+    bundles,
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    table,
+  })
+  check('registry=null 且没有 resolved → 用 https://registry.npmjs.org 兜底', viaNpm.calls.some((c) => c.url === `${NPMJS_HOST}/dsh-new`), JSON.stringify(viaNpm.calls.map((c) => c.url)))
+  check('  兜底地址确实进了汇总记录', viaNpm.log.some((e) => e.moduleName === '(registry)' && String(e.detail).includes(NPMJS_HOST)))
+  // 第一个 registry 查不到（404）→ 依次试 fallbackRegistries
+  const viaFallback = await scanWith({
+    bundles,
+    registries: { registry: REGISTRY_HOST, fallbackRegistries: [FALLBACK_HOST], resolved: null },
+    table: { 'dsh-new': '404' }, // 两个都 404
+  })
+  check(
+    'registry 404 → 依次试 fallbackRegistries',
+    viaFallback.calls.some((c) => c.url === `${REGISTRY_HOST}/dsh-new`) && viaFallback.calls.some((c) => c.url === `${FALLBACK_HOST}/dsh-new`),
+    JSON.stringify(viaFallback.calls.map((c) => c.url)),
+  )
+  check('  全 404 → 静默跳过、无 warn', viaFallback.logs.length === 0 && viaFallback.updates.length === 0)
+}
+
+// C7.6 fetchLatestVersion 单元（直接调，覆盖返回形状）
+{
+  const savedTable = registryTable
+  const savedTimeout = internals.REGISTRY_TIMEOUT_MS
+  registryTable = { 'dsh-new': '1.0.1', 'dsh-broken': 'bad-json', 'dsh-slow': 'hang' }
+  const hosts = [REGISTRY_HOST]
+  const ok = await internals.fetchLatestVersion('dsh-new', hosts)
+  check('fetchLatestVersion 成功 → {latest}', ok.latest === '1.0.1', JSON.stringify(ok))
+  const missing = await internals.fetchLatestVersion('dsh-nope', hosts)
+  check('fetchLatestVersion 404 → {missing:true}', missing.missing === true, JSON.stringify(missing))
+  const broken = await internals.fetchLatestVersion('dsh-broken', hosts)
+  check('fetchLatestVersion 坏 JSON → {failed:true}', broken.failed === true && String(broken.reason).includes('坏 JSON'), JSON.stringify(broken))
+  const empty = await internals.fetchLatestVersion('dsh-new', [])
+  check('fetchLatestVersion 没有 registry → {failed:true}（不抛）', empty.failed === true, JSON.stringify(empty))
+  internals.setRegistryTimeout(40)
+  const keepAlive = setInterval(() => {}, 20)
+  const slow = await internals.fetchLatestVersion('dsh-slow', hosts)
+  clearInterval(keepAlive)
+  check(
+    'fetchLatestVersion 真超时 → {failed:true}（AbortSignal.timeout 生效）',
+    slow.failed === true && /timeout|abort/i.test(String(slow.reason)),
+    JSON.stringify(slow),
+  )
+  check('scoped 包名编码正确', internals.encodePackageName('@scope/name') === '@scope%2Fname' && internals.encodePackageName('plain') === 'plain')
+  registryTable = savedTable
+  internals.setRegistryTimeout(savedTimeout)
+}
+
+// ---------------------------------------------------------------------------
 // D. HTTP 端点（真起 http 服务打真实 handler）
 // ---------------------------------------------------------------------------
 console.log('\n--- D. HTTP 端点 ---')
@@ -427,10 +731,19 @@ function createTimerStub(options = {}) {
 }
 
 let installMode = 'applied'
+// task-22：applyOne 现在先 removeBundle 再 installBundle，端点这条路的桩也要有 removeBundle。
+// removeMode 取 'applied' | 'restart-required' | 'throw' | 任意错误码（not-removable / bundle-in-use /
+// management-required / stop-profile / unaddressable …）。
+let removeMode = 'applied'
 const endpointInstalls = []
+const endpointRemoves = []
 const endpointManager = {
   async listBundles() {
     return BUNDLES
+  },
+  // task-21：最新版走 registry，端点这条路也要给 registries()。
+  async registries() {
+    return { registry: REGISTRY_HOST, fallbackRegistries: [], resolved: null }
   },
   async inspect(name) {
     if (Object.hasOwn(INSPECTIONS, name)) {
@@ -439,6 +752,16 @@ const endpointManager = {
       return value
     }
     return { status: 'refused', problem: 'not-found', reason: 'stub: 没有这个包' }
+  },
+  async removeBundle(name) {
+    endpointRemoves.push(name)
+    if (removeMode === 'throw') throw new Error('stub removeBundle 炸了')
+    if (removeMode === 'applied') return { changed: true, application: 'applied', stage: 'remove', target: name }
+    if (removeMode === 'restart-required') {
+      return { changed: true, application: 'restart-required', stage: 'remove', target: name, restartReason: 'no-hmr' }
+    }
+    // 其余一律当 ManagementFailure：change() 会折成 application=failed + error.code。
+    return { changed: false, application: 'failed', stage: 'remove', target: name, error: { code: removeMode } }
   },
   async installBundle(name) {
     endpointInstalls.push(name)
@@ -1720,6 +2043,318 @@ console.log('\n--- D14. 设置持久化 / settingsPath / 恢复默认 ---')
     const realFile = join(realHome, 'bug-reporter-settings.json')
     check('没有写脏真实 $DSH_HOME 下的设置文件', existsSync(realFile) === false, realFile)
   }
+}
+
+// ---------------------------------------------------------------------------
+// G. task-22：一键更新 = removeBundle → installBundle
+//
+// 根因：宿主有 HMR 时 installBundle 对「已经是 profile 依赖」的包一律抛
+// already-installed（@deepseek-ai/dsh-plugin-manager lib/index.js:1991），所以老实现
+// `installBundle(包名)` 装了等于没装。正确路径是先 removeBundle 摘掉依赖再装回来
+// （plugin_manager install_bundle 自己的 nextStep 就是这么说的）。
+//
+// 这一节把每一步的失败模式都钉死：顺序、记账、补救重装、绝不谎报 applied。
+// ---------------------------------------------------------------------------
+console.log('\n--- G. task-22 removeBundle → installBundle ---')
+
+// 自隔离：C7 会临时改 registryTable，这里显式写回本轮需要的三条。
+registryTable['dsh-alpha'] = '1.0.1'
+registryTable['dsh-beta'] = '1.2.0'
+registryTable['dsh-gamma'] = '2.0.0'
+
+const G_REMOVE_OK = { changed: true, application: 'applied', stage: 'remove', target: 'stub' }
+const G_INSTALL_OK = { changed: true, application: 'applied', stage: 'install', target: 'stub', version: '9.9.9' }
+const G_INSTALL_RESTART = {
+  changed: true,
+  application: 'restart-required',
+  stage: 'install',
+  target: 'stub',
+  version: '9.9.9',
+  restartReason: 'no-hmr',
+}
+/** 真实 change() 折出来的失败形状：application=failed + error.code。 */
+const gFail = (code) => ({ changed: false, application: 'failed', stage: 'stub', error: { code } })
+
+/** 记顺序的桩：remove / install 都往同一条 trace 里写，顺序一目了然。 */
+function gManager(trace, handlers) {
+  return {
+    async listBundles() {
+      return BUNDLES
+    },
+    async registries() {
+      return { registry: REGISTRY_HOST, fallbackRegistries: [FALLBACK_HOST], resolved: null }
+    },
+    async removeBundle(name) {
+      trace.push(`remove:${name}`)
+      return typeof handlers.remove === 'function' ? handlers.remove(name) : handlers.remove
+    },
+    async installBundle(name) {
+      trace.push(`install:${name}`)
+      return typeof handlers.install === 'function' ? handlers.install(name) : handlers.install
+    },
+  }
+}
+
+/** 造一个巡检完、updates 里有 3 条的 manager（autoUpdate 关着，巡检不会触发 apply）。 */
+async function gChecked(trace, handlers) {
+  const settings = { ...DEFAULTS, ignoredUpdates: [] }
+  const mgr = createUpdateManager(settings, { pluginManager: gManager(trace, handlers) }, () => {})
+  await mgr.runCheck()
+  return mgr
+}
+
+/** 某包里最后一条 updateLog。 */
+function gLast(mgr, moduleName) {
+  return mgr.log().filter((entry) => entry.moduleName === moduleName).pop()
+}
+
+// G1 正常更新：先 remove 再 install，只有 applied 才记 applied
+{
+  const trace = []
+  const mgr = await gChecked(trace, { remove: G_REMOVE_OK, install: G_INSTALL_OK })
+  check('G1 前置：巡检出 3 条可用更新', mgr.list().length === 3, `实际 ${mgr.list().length}`)
+  const out = await mgr.applyOne('dsh-alpha')
+  check('G1 调用顺序 = remove → install（不是直接 install）', trace.join(' | ') === 'remove:dsh-alpha | install:dsh-alpha', trace.join(' | '))
+  check('G1 返回 application=applied outcome=applied', out.application === 'applied' && out.outcome === 'applied', JSON.stringify(out))
+  const entry = gLast(mgr, 'dsh-alpha')
+  check(
+    'G1 updateLog 记 applied，detail 两步都在（remove=applied application=applied）',
+    entry !== undefined &&
+      entry.result === 'applied' &&
+      entry.detail.includes('remove=applied') &&
+      entry.detail.includes('application=applied'),
+    JSON.stringify(entry),
+  )
+  check('G1 成功后该包从 updates 消失（无幽灵条目）', mgr.has('dsh-alpha') === false)
+  check('G1 其余两条更新不受影响', mgr.list().length === 2, `实际 ${mgr.list().length}`)
+}
+
+// G2 install 返回 restart-required → 如实记 restart-required，绝不记 applied
+{
+  const trace = []
+  const mgr = await gChecked(trace, { remove: G_REMOVE_OK, install: G_INSTALL_RESTART })
+  const out = await mgr.applyOne('dsh-beta')
+  const entry = gLast(mgr, 'dsh-beta')
+  check('G2 restart-required 如实记（不是 applied）', entry.result === 'restart-required' && out.outcome === 'restart-required', JSON.stringify(entry))
+  check('G2 detail 带 restartReason=no-hmr', entry.detail.includes('restartReason=no-hmr'), entry.detail)
+  check('G2 依然走了 remove → install', trace.join(' | ') === 'remove:dsh-beta | install:dsh-beta', trace.join(' | '))
+}
+
+// G3 最危险的失败：remove 成功但 install 失败 → 补救重装一次 + 显眼 failed
+{
+  const trace = []
+  const mgr = await gChecked(trace, { remove: G_REMOVE_OK, install: gFail('not-bundle') })
+  const out = await mgr.applyOne('dsh-gamma')
+  check(
+    'G3 remove 成功 + install 失败 → **补救重装了一次**（install 被调 2 次）',
+    trace.join(' | ') === 'remove:dsh-gamma | install:dsh-gamma | install:dsh-gamma',
+    trace.join(' | '),
+  )
+  const entry = gLast(mgr, 'dsh-gamma')
+  check('G3 记 failed（绝不谎报 applied）', entry.result === 'failed' && out.outcome === 'failed', JSON.stringify(entry))
+  check('G3 detail 含「已移除但重装失败，需要手动重装」', entry.detail.includes('已移除但重装失败') && entry.detail.includes('需要手动重装'), entry.detail)
+  check('G3 detail 带具体错误码 not-bundle', entry.detail.includes('not-bundle'), entry.detail)
+  check('G3 detail 也带补救结果', entry.detail.includes('补救重装'), entry.detail)
+  check('G3 失败后该包**留在 updates 里**（用户还能重试）', mgr.has('dsh-gamma') === true)
+}
+
+// G4 补救重装成功 → 这次更新其实生效了，如实记 applied
+{
+  const trace = []
+  let attempt = 0
+  const mgr = await gChecked(trace, {
+    remove: G_REMOVE_OK,
+    install: () => (++attempt === 1 ? gFail('network') : G_INSTALL_OK),
+  })
+  const out = await mgr.applyOne('dsh-alpha')
+  const entry = gLast(mgr, 'dsh-alpha')
+  check('G4 首次失败 + 补救成功 → 记 applied（不是 failed）', out.outcome === 'applied' && entry.result === 'applied', JSON.stringify(entry))
+  check('G4 detail 说明首次失败原因 + 补救成功', entry.detail.includes('network') && entry.detail.includes('补救重装'), entry.detail)
+  check('G4 成功后从 updates 消失', mgr.has('dsh-alpha') === false)
+}
+
+// G5 四种「摘不掉」的错误码 → 停手、不 install、记 failed + 一句人话
+for (const code of ['not-removable', 'bundle-in-use', 'management-required', 'unaddressable']) {
+  const trace = []
+  const mgr = await gChecked(trace, { remove: gFail(code), install: G_INSTALL_OK })
+  const out = await mgr.applyOne('dsh-alpha')
+  const entry = gLast(mgr, 'dsh-alpha')
+  check(`G5 remove 返回 ${code} → 不调 install`, trace.join(' | ') === 'remove:dsh-alpha', trace.join(' | '))
+  check(`G5 remove 返回 ${code} → 记 failed`, entry.result === 'failed' && out.outcome === 'failed', JSON.stringify(entry))
+  check(
+    `G5 remove 返回 ${code} → detail 写「这个包不能自动更新，请手动 dsh plugin 更新」+ 错误码`,
+    entry.detail.includes('这个包不能自动更新') && entry.detail.includes('dsh plugin') && entry.detail.includes(code),
+    entry.detail,
+  )
+  check(`G5 remove 返回 ${code} → 该包留在 updates 里`, mgr.has('dsh-alpha') === true)
+}
+
+// G6 stop-profile → 记 restart-required（不是 applied），不 install
+{
+  const trace = []
+  const mgr = await gChecked(trace, { remove: gFail('stop-profile'), install: G_INSTALL_OK })
+  const out = await mgr.applyOne('dsh-alpha')
+  const entry = gLast(mgr, 'dsh-alpha')
+  check('G6 stop-profile → 不调 install', trace.join(' | ') === 'remove:dsh-alpha', trace.join(' | '))
+  check('G6 stop-profile → 记 restart-required（不是 applied / failed）', entry.result === 'restart-required' && out.outcome === 'restart-required', JSON.stringify(entry))
+  check('G6 stop-profile → detail 说明要重启 profile', entry.detail.includes('stop-profile') && entry.detail.includes('重启'), entry.detail)
+  check('G6 stop-profile → 该包留在 updates 里（重启后还能更新）', mgr.has('dsh-alpha') === true)
+}
+
+// G7 老宿主没有 removeBundle → 记 failed，绝不再硬着头皮 install
+{
+  const installsG7 = []
+  const settings = { ...DEFAULTS, ignoredUpdates: [] }
+  const pmWithoutRemove = {
+    async listBundles() {
+      return BUNDLES
+    },
+    async registries() {
+      return { registry: REGISTRY_HOST, fallbackRegistries: [FALLBACK_HOST], resolved: null }
+    },
+    async installBundle(name) {
+      installsG7.push(name)
+      return G_INSTALL_OK
+    },
+  }
+  const mgr = createUpdateManager(settings, { pluginManager: pmWithoutRemove }, () => {})
+  await mgr.runCheck()
+  const out = await mgr.applyOne('dsh-alpha')
+  const entry = gLast(mgr, 'dsh-alpha')
+  check('G7 removeBundle 不可用 → install 一次都没调', installsG7.length === 0, JSON.stringify(installsG7))
+  check('G7 removeBundle 不可用 → 记 failed', entry.result === 'failed' && out.outcome === 'failed', JSON.stringify(entry))
+  check('G7 detail 说明 removeBundle 不可用 + 手动更新', entry.detail.includes('removeBundle 不可用') && entry.detail.includes('dsh plugin'), entry.detail)
+  check('G7 该包留在 updates 里', mgr.has('dsh-alpha') === true)
+}
+
+// G8 removeBundle 自己抛错 → 记 failed 且往外抛（路由转 502），不 install
+{
+  const trace = []
+  const mgr = await gChecked(trace, {
+    remove: () => {
+      throw new Error('stub removeBundle 炸了')
+    },
+    install: G_INSTALL_OK,
+  })
+  let thrown = null
+  try {
+    await mgr.applyOne('dsh-alpha')
+  } catch (error) {
+    thrown = error
+  }
+  const entry = gLast(mgr, 'dsh-alpha')
+  check('G8 removeBundle 抛错 → 往外抛（端点才能转 502）', thrown !== null && String(thrown.message).includes('炸了'), String(thrown))
+  check('G8 removeBundle 抛错 → 不调 install', trace.join(' | ') === 'remove:dsh-alpha', trace.join(' | '))
+  check('G8 removeBundle 抛错 → updateLog 记 failed', entry !== undefined && entry.result === 'failed', JSON.stringify(entry))
+}
+
+// G9 autoUpdate=true 走的是**同一条** applyOne（remove → install 逐个包）
+{
+  const trace = []
+  const settings = { ...DEFAULTS, autoUpdate: true, updatePolicy: 'any', ignoredUpdates: [] }
+  const mgr = createUpdateManager(settings, { pluginManager: gManager(trace, { remove: G_REMOVE_OK, install: G_INSTALL_OK }) }, () => {})
+  await mgr.runCheck()
+  check(
+    'G9 autoUpdate=true 每个包都走了 remove → install',
+    trace.join(' | ') ===
+      'remove:dsh-alpha | install:dsh-alpha | remove:dsh-beta | install:dsh-beta | remove:dsh-gamma | install:dsh-gamma',
+    trace.join(' | '),
+  )
+  check('G9 autoUpdate 装完 updates 空（无幽灵条目）', mgr.list().length === 0, `实际 ${mgr.list().length}`)
+  check('G9 三条都记 applied', mgr.log().filter((entry) => entry.result === 'applied').length === 3, JSON.stringify(mgr.log().map((entry) => `${entry.moduleName}:${entry.result}`)))
+}
+
+// G10–G13 走真实例（真 socket 打真 handler + 带 pluginManager 的桩）。
+// 注意：主实例的 server 在 D 段末尾就 close 了，D14 的 bootInstance 又不带 pluginManager，
+// 所以这里必须自己起一个 —— 否则拿到的是 ECONNREFUSED。
+const gWebServer = createWebServerStub()
+const gHostLogs = []
+const { ctx: gCtx } = createFakeCtx({ webServer: gWebServer, pluginManager: endpointManager, timer: createTimerStub() }, gHostLogs)
+mod.apply(gCtx, {
+  storePath: join(STUB_DIR, 'g-reports.jsonl'),
+  settingsPath: join(STUB_DIR, 'g-reports.jsonl.settings.json'),
+  autoUpdate: false,
+  updatePolicy: 'any',
+})
+const gUpdates = mod.internals.active.updates
+const gServer = http.createServer((req, res) => gWebServer.handler(req, res))
+await new Promise((done) => gServer.listen(0, '127.0.0.1', done))
+const gOrigin = `http://127.0.0.1:${gServer.address().port}`
+async function gCall(path, options = {}) {
+  const init = { method: options.method === undefined ? 'POST' : options.method }
+  if (options.body !== undefined) {
+    init.headers = { 'content-type': 'application/json' }
+    init.body = JSON.stringify(options.body)
+  }
+  const response = await fetch(gOrigin + path, init)
+  let json = null
+  try {
+    json = await response.json()
+  } catch {
+    json = null
+  }
+  return { status: response.status, json }
+}
+
+// G10 端点：removeBundle 失败 → 200 + updateLog failed（软失败语义不变，不调 install）
+{
+  removeMode = 'not-removable'
+  endpointRemoves.length = 0
+  endpointInstalls.length = 0
+  await gCall('/bug-reporter/update/check', { body: {} })
+  const a = await gCall('/bug-reporter/update/apply', { body: { moduleName: 'dsh-alpha' } })
+  check('G10 端点：removeBundle 失败 → 仍 200 ok:true（软失败语义不变）', a.status === 200 && a.json.ok === true, `status=${a.status}`)
+  check('G10 端点：removeBundle 失败 → 不调 install', endpointInstalls.length === 0, JSON.stringify(endpointInstalls))
+  const entry = gLast(gUpdates, 'dsh-alpha')
+  check('G10 端点：updateLog 记 failed 且写明不能自动更新', entry.result === 'failed' && entry.detail.includes('不能自动更新'), JSON.stringify(entry))
+  removeMode = 'applied'
+}
+
+// G11 端点：removeBundle 抛错 → 502 operation-failed（错误码语义不变）
+{
+  removeMode = 'throw'
+  await gCall('/bug-reporter/update/check', { body: {} })
+  const a = await gCall('/bug-reporter/update/apply', { body: { moduleName: 'dsh-alpha' } })
+  check('G11 端点：removeBundle 抛错 → 502 operation-failed', a.status === 502 && a.json.error.code === 'operation-failed', JSON.stringify(a.json))
+  removeMode = 'applied'
+}
+
+// G12 端点：remove 成功但 install 抛错 → 502 + 补救重装 + detail 含「已移除但重装失败」
+{
+  removeMode = 'applied'
+  installMode = 'throw'
+  endpointRemoves.length = 0
+  endpointInstalls.length = 0
+  await gCall('/bug-reporter/update/check', { body: {} })
+  const a = await gCall('/bug-reporter/update/apply', { body: { moduleName: 'dsh-alpha' } })
+  check('G12 端点：install 抛错 → 502 operation-failed', a.status === 502 && a.json.error.code === 'operation-failed', JSON.stringify(a.json))
+  check(
+    'G12 端点：先 remove 再 install，且补救重装过一次',
+    endpointRemoves.join(',') === 'dsh-alpha' && endpointInstalls.length === 2,
+    `removes=${JSON.stringify(endpointRemoves)} installs=${JSON.stringify(endpointInstalls)}`,
+  )
+  const entry = gLast(gUpdates, 'dsh-alpha')
+  check('G12 端点：detail 含「已移除但重装失败」', entry !== undefined && entry.detail.includes('已移除但重装失败'), JSON.stringify(entry))
+  installMode = 'applied'
+}
+
+// G13 端点：成功路径 = remove 一次 + install 一次 + 该包从 updates 消失
+{
+  removeMode = 'applied'
+  installMode = 'applied'
+  endpointRemoves.length = 0
+  endpointInstalls.length = 0
+  await gCall('/bug-reporter/update/check', { body: {} })
+  const a = await gCall('/bug-reporter/update/apply', { body: { moduleName: 'dsh-alpha' } })
+  check(
+    'G13 端点成功：200 + remove 一次 + install 一次',
+    a.status === 200 && endpointRemoves.join(',') === 'dsh-alpha' && endpointInstalls.join(',') === 'dsh-alpha',
+    `status=${a.status} removes=${JSON.stringify(endpointRemoves)} installs=${JSON.stringify(endpointInstalls)}`,
+  )
+  check('G13 端点成功：该包从 updates 消失', !a.json.value.updates.some((item) => item.moduleName === 'dsh-alpha'))
+  const entry = gLast(gUpdates, 'dsh-alpha')
+  check('G13 端点成功：updateLog 记 applied 且 detail 带 remove=applied', entry.result === 'applied' && entry.detail.includes('remove=applied'), JSON.stringify(entry))
+  gServer.close()
 }
 
 // 清理本次跑出来的临时目录（store / pkg-fence 都在里面）。
